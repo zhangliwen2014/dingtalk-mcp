@@ -6,12 +6,11 @@ import { SingleInstance } from './single-instance.js';
 import * as paths from '../platform/paths.js';
 import * as ipc from '../platform/ipc.js';
 import * as identity from '../platform/identity.js';
-import { spawn, ChildProcess } from 'child_process';
 
 export class Daemon {
   private server: DaemonServer | null = null;
   private instance: SingleInstance | null = null;
-  private dwsProcess: ChildProcess | null = null;
+  private transport: DwsTransport | null = null;
 
   async start(): Promise<void> {
     const instanceId = identity.instanceId();
@@ -24,29 +23,36 @@ export class Daemon {
 
     const configDir = paths.home();
     const ipcEndpoint = ipc.endpoint(instanceId);
-    const transport = new DwsTransport();
+    this.transport = new DwsTransport();
     const switchControl = new Switch(configDir);
     const registry = new Registry(configDir);
     registry.load();
 
     this.server = new DaemonServer({
-      transport,
+      transport: this.transport,
       switch: switchControl,
       registry,
       ipcEndpoint,
     });
 
     await this.server.start();
-    this.startDwsListener(transport);
+    
+    // Start polling for messages
+    await this.transport.listen((message) => {
+      this.server!.rpc('ingest', { text: message.text }).catch((err) => {
+        console.error('Ingest error:', err);
+      });
+    });
 
     console.log(`Daemon started on ${ipcEndpoint}`);
     console.log(`Instance ID: ${instanceId}`);
+    console.log(`Polling for messages every 3 seconds...`);
   }
 
   async stop(): Promise<void> {
-    if (this.dwsProcess) {
-      this.dwsProcess.kill();
-      this.dwsProcess = null;
+    if (this.transport) {
+      this.transport.stopListening();
+      this.transport = null;
     }
 
     if (this.server) {
@@ -58,42 +64,6 @@ export class Daemon {
       await this.instance.release();
       this.instance = null;
     }
-  }
-
-  private startDwsListener(transport: DwsTransport): void {
-    this.dwsProcess = spawn('dws', ['event', '+listen-im', '--kind', 'all-direct'], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    this.dwsProcess.stdout?.on('data', (data) => {
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            const event = JSON.parse(line);
-            if (event.type === 'message' && event.text) {
-              transport.handleInbound({
-                senderId: event.senderId || 'unknown',
-                text: event.text,
-                conversationId: event.conversationId || '',
-                timestamp: event.timestamp || Date.now(),
-              });
-            }
-          } catch {
-            // Ignore parse errors
-          }
-        }
-      }
-    });
-
-    this.dwsProcess.stderr?.on('data', (data) => {
-      console.error('dws event error:', data.toString());
-    });
-
-    this.dwsProcess.on('close', (code) => {
-      console.log(`dws event listener exited with code ${code}`);
-      this.dwsProcess = null;
-    });
   }
 }
 

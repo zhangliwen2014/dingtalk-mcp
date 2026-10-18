@@ -92,6 +92,8 @@ export class DaemonServer {
     question: string;
     target: string;
   }): Promise<any> {
+    console.log('[Ask] Starting, target:', params.target);
+    
     const enabled = await this.switch.get();
     if (!enabled) {
       return {
@@ -101,8 +103,13 @@ export class DaemonServer {
       };
     }
 
+    console.log('[Ask] Resolving target...');
     const targetId = await this.transport.resolveTarget(params.target);
+    console.log('[Ask] Target resolved to:', targetId);
+    
     const id = this.registry.allocateId();
+    console.log('[Ask] Allocated ID:', id);
+    
     const question = this.registry.add({
       id,
       text: params.question,
@@ -110,9 +117,12 @@ export class DaemonServer {
     });
 
     const message = `#Q${id}: ${params.question}`;
+    console.log('[Ask] Sending message:', message);
     await this.transport.sendText(targetId, message);
+    console.log('[Ask] Message sent');
 
     this.registry.save();
+    console.log('[Ask] Registry saved');
 
     return {
       ok: true,
@@ -174,8 +184,13 @@ export class DaemonServer {
   }
 
   private async handleIngest(params: { text: string }): Promise<any> {
+    console.log('[Ingest] Received text:', params.text);
+    
     const pending = this.registry.listPending();
+    console.log('[Ingest] Pending questions:', pending.length);
+    
     const result = route(params.text, pending);
+    console.log('[Ingest] Route result:', result);
 
     if (result.kind === 'command') {
       if (result.cmd === 'enable') {
@@ -197,14 +212,19 @@ export class DaemonServer {
       if (question) {
         question.accept(result.text, 'phone');
         this.registry.save();
+        console.log('[Ingest] Answer accepted for Q' + result.id);
+      } else {
+        console.log('[Ingest] Question Q' + result.id + ' not found');
       }
       return { ok: true, routed: 'answer', id: result.id };
     }
 
     if (result.kind === 'ambiguous') {
+      console.log('[Ingest] Ambiguous - multiple pending questions');
       return { ok: false, error: 'ambiguous', routed: 'none' };
     }
 
+    console.log('[Ingest] No route matched');
     return { ok: true, routed: 'none' };
   }
 
