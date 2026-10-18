@@ -1,0 +1,41 @@
+{
+  "name": "dtmcp",
+  "version": "0.1.0",
+  "description": "DingTalk MCP bridge: push agent questions to mobile DingTalk, get answers back, continue working",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "dtmcp": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": [
+    "dingtalk",
+    "mcp",
+    "agent",
+    "remote",
+    "question"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
