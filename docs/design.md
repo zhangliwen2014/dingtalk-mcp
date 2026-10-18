@@ -1,6 +1,6 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v1.4（多项目独立会话架构）
+版本：v1.5（可行性验证完成，实时事件可用）
 日期：2026-10-18
 关联文档：[需求文档](./requirements.md)
 
@@ -303,33 +303,134 @@ async handleIngest(message: InboundMessage) {
 - ✓ 直接根据会话 ID 定位项目
 - ✓ 项目内最新 pending 问题自动获得答案
 
-### 3.5.6 监听策略
+### 3.5.6 实时事件监听（可行性已验证）
 
-```typescript
-// transport/dws-transport.ts
+**验证结论（2026-10-18）：**
+- ✓ 实时事件监听**可以工作**
+- ✓ 使用 `dws event consume user_im_message_receive_group --group <chatId>`
+- ✓ 连接建立需要 3-5 秒，之后消息实时推送（延迟 <1 秒）
+- ✗ `dws event +listen-im` 不工作（已废弃）
 
-async listen(projectChats: ProjectChat[]) {
-  // 方案 A：为每个项目会话启动独立监听
-  for (const chat of projectChats) {
-    this.listenToChat(chat.chatId);
-  }
-  
-  // 方案 B：统一监听，按 conversationId 分发
-  this.listenAll((message) => {
-    const chat = projectChats.find(c => c.chatId === message.conversationId);
-    if (chat) {
-      this.onMessage(chat, message);
-    }
-  });
-}
+**监听命令：**
+```bash
+# 监听指定群聊的消息
+dws event consume user_im_message_receive_group \
+  --group <chatId> \
+  --flatten \
+  -f ndjson
+```
 
-async listenToChat(chatId: string) {
-  // dws event +listen-im --chat-id <chatId>
-  spawn('dws', ['event', '+listen-im', '--chat-id', chatId, '-f', 'ndjson']);
+**输出格式（ndjson）：**
+```json
+{
+  "type": "user_im_message_receive_group",
+  "event_id": "782b93da680542d9bd861d20b78311ed",
+  "timestamp": 1792337119863,
+  "subscribe_id": "subId-ebd1ba47faa1437092fde3b12fe9e0b8",
+  "message_id": "msggNobcfn3kGwW41TyZkeijg==",
+  "conversation_id": "cidcAiBlc9HORdYdKGT3IiZsA==",
+  "sender": "立文",
+  "sender_open_dingtalk_id": "DiPCkVk9snxeAlc5iiDTOTAPkRVmd6EYMXa",
+  "content": "保留备份",
+  "create_time": "2026-10-18 23:25:19",
+  "event_time": 1792337119491
 }
 ```
 
-**推荐方案 B**：统一监听，按 conversationId 分发，避免多个监听进程。
+**关键字段：**
+- `conversation_id` - 用于匹配项目会话
+- `content` - 用户回复的内容
+- `sender` - 回复者姓名
+- `create_time` - 消息时间
+
+**Daemon 实现：**
+```typescript
+// daemon/index.ts
+
+class Daemon {
+  private eventProcesses: Map<string, ChildProcess> = new Map();  // chatId → process
+  
+  async startListeningForChat(chatId: string) {
+    if (this.eventProcesses.has(chatId)) {
+      return;  // 已在监听
+    }
+    
+    const proc = spawn('dws', [
+      'event', 'consume',
+      'user_im_message_receive_group',
+      '--group', chatId,
+      '--flatten',
+      '-f', 'ndjson'
+    ], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    
+    proc.stdout.on('data', (data) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        if (line.trim()) {
+          try {
+            const event = JSON.parse(line);
+            this.handleGroupMessage(event);
+          } catch (err) {
+            // 忽略解析错误
+          }
+        }
+      }
+    });
+    
+    this.eventProcesses.set(chatId, proc);
+  }
+  
+  async handleGroupMessage(event: any) {
+    const chatId = event.conversation_id;
+    const content = event.content;
+    
+    // 根据 chatId 找到项目
+    const projectChat = this.projectChatManager.getProjectByChatId(chatId);
+    if (!projectChat) {
+      return;
+    }
+    
+    // 找到该项目的最新 pending 问题
+    const pendingQuestion = projectChat.questionIds
+      .map(id => this.registry.get(id))
+      .filter(q => q && q.status === 'pending')
+      .pop();
+    
+    if (!pendingQuestion) {
+      return;
+    }
+    
+    // 接受答案
+    pendingQuestion.accept(content, 'phone');
+    
+    // 通知等待的客户端
+    const waiting = this.waitingRequests.get(pendingQuestion.id);
+    if (waiting) {
+      waiting.resolve(content);
+    }
+  }
+  
+  async stop() {
+    for (const proc of this.eventProcesses.values()) {
+      proc.kill();
+    }
+    this.eventProcesses.clear();
+  }
+}
+```
+
+**优势（vs 轮询）：**
+- ✓ 延迟 <1 秒（轮询 3-6 秒）
+- ✓ 无 API 调用开销
+- ✓ 实时用户体验
+- ✓ 资源占用低
+
+**注意事项：**
+- 每个项目会话需要一个独立的 `dws event consume` 进程
+- 连接建立需要 3-5 秒，首次提问有冷启动延迟
+- 进程异常退出时需要自动重启
 
 ### 3.5.7 MCP 工具更新
 
@@ -463,19 +564,21 @@ mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title
 
 ### 3.5.11 实施计划
 
-**阶段 1（当前）：项目会话管理**
+**阶段 1（当前）：项目会话管理 + 实时监听**
 - 实现 `ProjectChatManager`
+- 实现 `dws event consume` 实时监听
 - 更新 `daemon/server.ts` 支持项目会话
 - 更新 MCP 工具接口
-- 测试：多项目并发，验证会话隔离
+- 测试：多项目并发，验证实时接收
 
-**阶段 2：监听优化**
-- 实现按会话监听
-- 优化轮询策略（只轮询活跃项目会话）
+**阶段 2：可靠性增强**
+- 添加监听进程自动重启
+- 添加超时机制（问题 45 秒未回答自动 expire）
+- 添加会话自动清理（30 天不活跃）
 
 **阶段 3：UX 增强**
-- 会话自动清理（30 天不活跃）
 - 项目标题智能推断（从 git remote / package.json）
+- 会话历史记录查询
 
 ### 3.5.12 与 v1.3 的对比
 
