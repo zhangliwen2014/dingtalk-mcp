@@ -1,6 +1,6 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v1.3（架构 review 后修订）
+版本：v1.4（多项目独立会话架构）
 日期：2026-10-18
 关联文档：[需求文档](./requirements.md)
 
@@ -133,296 +133,359 @@ src/
 | `daemon/server.ts` | 装配，持有全部状态，回答 RPC | 由 `dtmcp start` 或客户端自动拉起 | core + transport + platform |
 | `mcp/server.ts` | MCP 协议 → daemon RPC 的翻译 | 写进 agent 的 mcp 配置 | daemon IPC 端点 |
 
-## 3.5 多 Session 支持（v1.3 修订，架构 review 后）
+## 3.5 多项目支持：独立会话架构（v1.4 修订）
 
 ### 3.5.1 问题背景
 
-v1.1 实现验证发现两个关键问题：
+v1.3 的 Session 方案虽然解决了 IPC 连接隔离，但用户体验有问题：
+- 多个项目的问题混在同一个聊天窗口
+- 用户需要输入 `#Q1:` 前缀来区分回答
+- 手机上看不出问题来自哪个项目
 
-1. **实时性不足**：`dws event +listen-im` 实时事件监听不工作（V2 验证失败），退化为 3 秒间隔轮询，延迟 3-6 秒
-2. **多项目混淆**：多个 agent/项目同时提问时，回复难以正确归因到对应项目
-
-**架构 review 后的核心洞察**：
-
-> Session 的本质是"哪个 IPC 连接在等哪些问题的答案"，不是一个需要路由标记的用户可见概念。把 Session 限制在 daemon 内部，可以砍掉消息标记、路由规则扩展、Session ID 生成等一整套复杂度。
-
-### 3.5.2 简化架构：Session 作为 IPC 连接管理
+### 3.5.2 核心设计：每个项目独立会话
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Project A  │     │  Project B  │     │  Project C  │
-│  (MCP 客户端)│     │  (MCP 客户端)│     │  (MCP 客户端)│
-└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-       │ IPC 连接 1        │ IPC 连接 2        │ IPC 连接 3
-       └───────────────────┼───────────────────┘
-                           │
-                    ┌──────▼──────┐
-                    │   Daemon    │
-                    │             │
-                    │  Session    │
-                    │  Manager    │
-                    │  (内部)     │
-                    └──────┬──────┘
-                           │
-                    ┌──────▼──────┐
-                    │  Registry   │
-                    │ (全局问题表) │
-                    └──────┬──────┘
-                           │
-                    ┌──────▼──────┐
-                    │  Transport  │
-                    │  (轮询/事件) │
-                    └─────────────┘
+┌─────────────┐                    ┌──────────────────────┐
+│  Project A  │──── ask ──────────▶│       Daemon         │
+│  "官网重构"  │                    │                      │
+└─────────────┘                    │  1. 查找/创建会话     │
+                                   │     "官网重构问答"    │
+┌─────────────┐                    │                      │
+│  Project B  │──── ask ──────────▶│  2. 发送问题到该会话  │
+│  "数据分析"  │                    │                      │
+└─────────────┘                    │  3. 监听该会话的回复  │
+                                   └──────────┬───────────┘
+                                              │
+                                   ┌──────────▼───────────┐
+                                   │     手机钉钉          │
+                                   │                      │
+                                   │  ┌────────────────┐  │
+                                   │  │ 官网重构问答     │  │
+                                   │  │ Q: 保留备份？    │  │
+                                   │  │ A: [用户回复]    │  │
+                                   │  └────────────────┘  │
+                                   │                      │
+                                   │  ┌────────────────┐  │
+                                   │  │ 数据分析问答     │  │
+                                   │  │ Q: 用哪个分支？  │  │
+                                   │  │ A: [用户回复]    │  │
+                                   │  └────────────────┘  │
+                                   └──────────────────────┘
 ```
 
-**核心设计原则：**
+**用户体验：**
+- ✓ 手机上看到独立的会话，标题清晰（"官网重构问答"、"数据分析问答"）
+- ✓ 直接在会话中回复，不需要 `#Q1:` 前缀
+- ✓ 不会搞混哪个问题属于哪个项目
+- ✓ 可以独立查看每个项目的问答历史
 
-1. **Session 是 daemon 内部概念**，不暴露给用户或 MCP 客户端
-2. **Question ID 全局唯一**，`#Q3: 答案` 足够定位，不需要 session 标记
-3. **Session 与 IPC 连接绑定**，连接断开 = session 结束
-4. **路由器保持纯函数**，不引入 EventBus 抽象层
-
-### 3.5.3 Session 接口设计（简化版）
+### 3.5.3 会话管理
 
 ```typescript
-interface Session {
-  id: string;                    // 自动生成，基于 IPC socket fd 或连接标识
-  socket: net.Socket;            // 关联的 IPC 连接
-  questionIds: Set<number>;      // 该 session 提出的问题 ID 列表
+interface ProjectChat {
+  projectId: string;           // 项目标识
+  projectTitle: string;        // 项目标题（如"官网重构"）
+  chatId: string;              // 钉钉会话 ID
+  sessionId: string;           // Daemon 内部 Session ID
+  questionIds: number[];       // 该项目的问题 ID 列表
   createdAt: number;
   lastActiveAt: number;
 }
 
-interface SessionManager {
-  // 创建 session（IPC 连接建立时调用）
-  createSession(socket: net.Socket): Session;
+interface ProjectChatManager {
+  // 获取或创建项目会话
+  async getOrCreateChat(projectId: string, projectTitle: string): Promise<ProjectChat>;
   
-  // 获取 session（基于 socket）
-  getSessionBySocket(socket: net.Socket): Session | undefined;
+  // 根据 chatId 查找项目
+  getProjectByChatId(chatId: string): ProjectChat | undefined;
   
-  // 获取 session（基于 question ID）
-  getSessionByQuestionId(questionId: number): Session | undefined;
+  // 列出所有项目会话
+  listProjectChats(): ProjectChat[];
   
-  // 关闭 session（IPC 连接断开时调用）
-  closeSession(socket: net.Socket): void;
-  
-  // 列出所有活跃 session（仅用于诊断）
-  listActiveSessions(): Session[];
+  // 关闭项目会话（可选）
+  async closeChat(projectId: string): Promise<void>;
 }
 ```
 
-**关键变化（vs v1.2）：**
-- ✗ 不暴露 `questions` Map，只持有 question ID 列表
-- ✗ 不持有回调函数（`onAnswer` / `onTimeout`）
-- ✓ Session ID 自动生成，不依赖客户端传入
-- ✓ 与 IPC socket 绑定，生命周期由连接决定
-
-### 3.5.4 消息路由（保持现有规则）
-
-**发送时不带 session 标记**：
-
-```typescript
-// 问题文本格式（与 v1.1 相同）
-#Q{questionId}: {问题内容}
-
-// 示例
-#Q1: 保留备份还是删除？
+**会话命名规则：**
+```
+格式：{projectTitle}问答
+示例：
+  - "官网重构问答"
+  - "数据分析问答"
+  - "移动端 App问答"
+  - "API 重构问答"
 ```
 
-**用户回复格式（与 v1.1 相同）**：
-
-```
-#Q1: 保留备份
-```
-
-**路由规则（保持 v1.1 的 4 条，不扩展）**：
-
-```typescript
-// core/router.ts 保持不变
-function route(text: string, pendingQuestions: Question[]): RouteResult {
-  // 规则 1：保留命令（#开/#关/#忽略）
-  // 规则 2：显式 question ID（#Q1: 答案）
-  // 规则 3：单 pending 自动归因
-  // 规则 4：多 pending → ambiguous
-}
-```
-
-**Session 的作用**：路由成功后，daemon 通过 `SessionManager.getSessionByQuestionId(questionId)` 找到对应的 IPC 连接，将答案返回给等待的客户端。
-
-### 3.5.5 Daemon 内部流程
+### 3.5.4 发送流程
 
 ```typescript
 // daemon/server.ts
 
-class DaemonServer {
-  private sessionManager: SessionManager;
-  private waitingRequests: Map<number, {
-    resolve: (answer: string) => void,
-    timeout: NodeJS.Timeout
-  }> = new Map();
+async handleAsk(params: { 
+  question: string; 
+  target: string;
+  project_id?: string;      // 项目标识
+  project_title?: string;   // 项目标题
+}, socket: net.Socket) {
+  // 1. 确定项目信息
+  const projectId = params.project_id || 'default';
+  const projectTitle = params.project_title || '默认项目';
+  
+  // 2. 获取或创建项目会话
+  const projectChat = await this.projectChatManager.getOrCreateChat(
+    projectId, 
+    projectTitle
+  );
+  
+  // 3. 分配问题 ID
+  const id = this.registry.allocateId();
+  const question = this.registry.add({ 
+    id, 
+    text: params.question, 
+    target: projectChat.chatId  // 发送到项目会话
+  });
+  projectChat.questionIds.push(id);
+  
+  // 4. 发送问题到项目会话（不带 #Q1: 前缀）
+  await this.transport.sendText(
+    projectChat.chatId, 
+    params.question  // 纯文本，如"保留备份还是删除？"
+  );
+  
+  // 5. 记录等待
+  const session = this.sessionManager.getSessionBySocket(socket);
+  this.questionToSession.set(id, session);
+  
+  return { ok: true, status: 'pending', id };
+}
+```
 
-  // IPC 连接建立时
-  handleConnection(socket: net.Socket) {
-    const session = this.sessionManager.createSession(socket);
-    
-    socket.on('close', () => {
-      this.sessionManager.closeSession(socket);
-    });
-    
-    // ... 处理 RPC 请求
+### 3.5.5 接收流程
+
+```typescript
+// daemon/server.ts
+
+async handleIngest(message: InboundMessage) {
+  // 1. 根据消息来源找到项目
+  const projectChat = this.projectChatManager.getProjectByChatId(
+    message.conversationId
+  );
+  
+  if (!projectChat) {
+    return; // 不是项目会话的消息，忽略
   }
-
-  // ask 请求处理
-  async handleAsk(params: { question: string; target: string }, socket: net.Socket) {
-    const session = this.sessionManager.getSessionBySocket(socket);
-    const id = this.registry.allocateId();
-    const question = this.registry.add({ id, text: params.question, target: params.target });
-    session.questionIds.add(id);
-    
-    // 发送消息
-    await this.transport.sendText(params.target, `#Q${id}: ${params.question}`);
-    
-    // 返回 pending（不阻塞）
-    return { ok: true, status: 'pending', id };
+  
+  // 2. 找到该项目的最新 pending 问题
+  const pendingQuestion = projectChat.questionIds
+    .map(id => this.registry.get(id))
+    .filter(q => q && q.status === 'pending')
+    .pop();  // 取最后一个
+  
+  if (!pendingQuestion) {
+    return; // 该项目没有 pending 问题
   }
-
-  // check 请求处理（长轮询）
-  async handleCheck(params: { id: number; timeout_ms?: number }, socket: net.Socket) {
-    const question = this.registry.get(params.id);
-    
-    if (question.status === 'answered') {
-      return { ok: true, status: 'answered', answer: question.answer };
-    }
-    
-    // 如果指定了 timeout，挂起等待
-    if (params.timeout_ms && params.timeout_ms > 0) {
-      return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-          this.waitingRequests.delete(params.id);
-          resolve({ ok: true, status: 'pending' });
-        }, params.timeout_ms);
-        
-        this.waitingRequests.set(params.id, {
-          resolve: (answer: string) => {
-            clearTimeout(timeout);
-            this.waitingRequests.delete(params.id);
-            resolve({ ok: true, status: 'answered', answer });
-          },
-          timeout
-        });
-      });
-    }
-    
-    return { ok: true, status: 'pending' };
-  }
-
-  // 消息接收（来自 transport 层）
-  async handleIngest(text: string) {
-    const pending = this.registry.listPending();
-    const result = route(text, pending);
-    
-    if (result.kind === 'answer') {
-      const question = this.registry.get(result.id);
-      question.accept(result.text, 'phone');
-      
-      // 通知等待的客户端
-      const waiting = this.waitingRequests.get(result.id);
-      if (waiting) {
-        waiting.resolve(result.text);
-      }
-    }
+  
+  // 3. 接受答案（用户直接回复文本，不需要 #Q1: 前缀）
+  pendingQuestion.accept(message.text, 'phone');
+  
+  // 4. 通知等待的客户端
+  const session = this.questionToSession.get(pendingQuestion.id);
+  const waiting = this.waitingRequests.get(pendingQuestion.id);
+  if (waiting) {
+    waiting.resolve(message.text);
   }
 }
 ```
 
-**关键流程：**
-1. MCP client 发起 `ask` → daemon 创建 question，返回 pending
-2. MCP client 发起 `check(id, timeout_ms=45000)` → daemon 挂起等待
-3. 用户手机回复 → transport 轮询收到 → `handleIngest` 路由 → `question.accept()`
-4. daemon 检查 `waitingRequests`，找到等待该 question 的请求，返回答案
-5. MCP client 的 `check` 调用返回 `{ status: 'answered', answer: '...' }`
+**路由简化：**
+- ✗ 不需要解析 `#Q1:` 前缀
+- ✓ 直接根据会话 ID 定位项目
+- ✓ 项目内最新 pending 问题自动获得答案
 
-### 3.5.6 实时事件源（推迟到 V2 验证后）
+### 3.5.6 监听策略
 
-**当前状态**：3 秒定时轮询（v1.1 已实现，工作正常）
+```typescript
+// transport/dws-transport.ts
 
-**未来优化方向**（V2 验证通过后）：
-- 如果 `dws event +listen-im` 可用 → 直接用推送式事件流
-- 如果需要长轮询 → 改 `DingTransport` 接口，增加 `fetchNewMessages({ since, timeout })` 方法
+async listen(projectChats: ProjectChat[]) {
+  // 方案 A：为每个项目会话启动独立监听
+  for (const chat of projectChats) {
+    this.listenToChat(chat.chatId);
+  }
+  
+  // 方案 B：统一监听，按 conversationId 分发
+  this.listenAll((message) => {
+    const chat = projectChats.find(c => c.chatId === message.conversationId);
+    if (chat) {
+      this.onMessage(chat, message);
+    }
+  });
+}
 
-**不在本阶段设计长轮询**，避免在 V2 未验证前过度设计。
+async listenToChat(chatId: string) {
+  // dws event +listen-im --chat-id <chatId>
+  spawn('dws', ['event', '+listen-im', '--chat-id', chatId, '-f', 'ndjson']);
+}
+```
 
-### 3.5.7 模块更新（简化版）
+**推荐方案 B**：统一监听，按 conversationId 分发，避免多个监听进程。
+
+### 3.5.7 MCP 工具更新
+
+#### `ask_on_dingtalk`（更新）
+
+输入新增：
+```json
+{
+  "question": "string，必填",
+  "target": "string，必填（用户 ID）",
+  "project_id": "string，选填，项目标识",
+  "project_title": "string，选填，项目标题（显示在会话名称中）"
+}
+```
+
+示例：
+```json
+{
+  "question": "保留备份还是删除？",
+  "target": "016825045624390379",
+  "project_id": "website-rewrite",
+  "project_title": "官网重构"
+}
+```
+
+#### `list_projects`（新增）
+
+```json
+// 输出
+{
+  "projects": [
+    {
+      "id": "website-rewrite",
+      "title": "官网重构",
+      "chatId": "cidXXX",
+      "pendingCount": 1,
+      "createdAt": "2026-10-18T15:00:00Z"
+    }
+  ]
+}
+```
+
+### 3.5.8 会话创建与查找
+
+```typescript
+// core/project-chat-manager.ts
+
+class ProjectChatManager {
+  private chats: Map<string, ProjectChat> = new Map();  // projectId → ProjectChat
+  
+  async getOrCreateChat(projectId: string, projectTitle: string): Promise<ProjectChat> {
+    // 1. 查找已有会话
+    const existing = this.chats.get(projectId);
+    if (existing) {
+      existing.lastActiveAt = Date.now();
+      return existing;
+    }
+    
+    // 2. 在钉钉中查找或创建会话
+    const chatName = `${projectTitle}问答`;
+    let chatId = await this.findChatByName(chatName);
+    
+    if (!chatId) {
+      chatId = await this.createChat(chatName, [currentUserId]);
+    }
+    
+    // 3. 记录映射
+    const chat: ProjectChat = {
+      projectId,
+      projectTitle,
+      chatId,
+      sessionId: crypto.randomUUID(),
+      questionIds: [],
+      createdAt: Date.now(),
+      lastActiveAt: Date.now()
+    };
+    
+    this.chats.set(projectId, chat);
+    return chat;
+  }
+  
+  private async findChatByName(name: string): Promise<string | null> {
+    // dws chat +chat-list --query <name>
+    const result = await proc.run([
+      'dws', 'chat', '+chat-list', '--query', name, '-f', 'json'
+    ]);
+    const chats = JSON.parse(result.stdout);
+    return chats.find(c => c.name === name)?.id || null;
+  }
+  
+  private async createChat(name: string, members: string[]): Promise<string> {
+    // dws chat +create --name <name> --members <members>
+    const result = await proc.run([
+      'dws', 'chat', '+create', 
+      '--name', name, 
+      '--members', members.join(','),
+      '-f', 'json',
+      '--yes'
+    ]);
+    const chat = JSON.parse(result.stdout);
+    return chat.id;
+  }
+  
+  getProjectByChatId(chatId: string): ProjectChat | undefined {
+    return Array.from(this.chats.values()).find(c => c.chatId === chatId);
+  }
+}
+```
+
+### 3.5.9 模块更新
 
 新增模块：
-
 ```
 src/
   core/
-    session.ts          ← Session 实体与 SessionManager（新增）
+    project-chat-manager.ts  ← 项目会话管理（新增）
 ```
 
 更新模块：
-
 ```
-daemon/server.ts        ← 持有 SessionManager，管理 IPC 连接与 session 的映射
+daemon/server.ts             ← 持有 ProjectChatManager
+transport/dws-transport.ts   ← 支持按会话监听
+mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title
 ```
 
-**不更新的模块**：
-- `core/router.ts` - 保持纯函数，不改动
-- `core/registry.ts` - 保持全局问题表，不改动
-- `mcp/server.ts` - 不需要传 projectId/sessionId
-- `transport/dws-transport.ts` - 保持 3 秒轮询，不改动
+### 3.5.10 向后兼容
 
-### 3.5.8 MCP 工具（无变化）
+- 不传 `project_id` / `project_title` → 使用默认项目"默认项目问答"
+- 单项目场景 → 行为与 v1.3 相同（只有一个会话）
+- 现有测试 → 保持不变
 
-`ask_on_dingtalk` / `check_answer` / `cancel_question` / `dingtalk_status` 接口与 v1.1 完全相同，不需要新增字段或工具。
+### 3.5.11 实施计划
 
-**可选增强**（未来）：
-- `list_sessions` - 仅用于诊断，返回活跃 session 数量和问题数
+**阶段 1（当前）：项目会话管理**
+- 实现 `ProjectChatManager`
+- 更新 `daemon/server.ts` 支持项目会话
+- 更新 MCP 工具接口
+- 测试：多项目并发，验证会话隔离
 
-### 3.5.9 向后兼容
+**阶段 2：监听优化**
+- 实现按会话监听
+- 优化轮询策略（只轮询活跃项目会话）
 
-- 单项目场景：行为与 v1.1 完全相同
-- 多项目场景：每个 MCP client 进程自动获得独立 session，无需任何配置
-- 现有测试：保持不变
-- 现有 API：完全兼容
+**阶段 3：UX 增强**
+- 会话自动清理（30 天不活跃）
+- 项目标题智能推断（从 git remote / package.json）
 
-### 3.5.10 实施计划
+### 3.5.12 与 v1.3 的对比
 
-**阶段 1（当前）：Session 层**
-- 实现 `Session` 和 `SessionManager`
-- 更新 `daemon/server.ts` 管理 IPC 连接与 session 映射
-- 实现 `check` 的长轮询等待机制
-- 测试：多 MCP client 并发提问，验证答案正确返回到对应 client
-
-**阶段 2（V2 验证后）：事件源升级**
-- 如果 V2 通过：用 `dws event +listen-im` 替代轮询
-- 如果 V2 失败：保持轮询，考虑缩短间隔到 1 秒
-
-**阶段 3（可选）：可靠性增强**
-- 添加超时机制（问题 45 秒未回答自动 expire）
-- 添加重试机制（poll 失败指数退避重试）
-- 添加 session 清理（IPC 断开自动清理）
-
-### 3.5.11 与 v1.2 的对比
-
-| 设计点 | v1.2 | v1.3（本版本） | 理由 |
-|--------|------|----------------|------|
-| EventBus | ✓ 引入 | ✗ 不引入 | 路由器保持纯函数，更简单可测试 |
-| Session ID 生成 | 客户端传 projectId | daemon 基于 IPC 连接自动生成 | 避免"谁来填 projectId"的无解问题 |
-| 消息标记 | `#sessionId-Q1: 内容` | `#Q1: 内容`（无 session 标记） | 用户不应在手机上输入长字符串 |
-| Session 持久化 | 需要设计 state.json 格式 | 不持久化，与 IPC 连接绑定 | 最简单，符合现有架构 |
-| 长轮询设计 | 详细设计 | 推迟到 V2 验证后 | 避免在沙上建塔 |
-| Session 接口 | 暴露 questions Map，持有回调 | 只持有 question ID 列表，无回调 | Session 是数据容器，不是事件处理器 |
-
-**复杂度对比**：
-- v1.2：需要改 router、transport、MCP 工具、state.json 格式
-- v1.3：只需新增 session.ts，更新 daemon/server.ts
-
-**代码量估算**：
-- v1.2：~300 行新增/修改
-- v1.3：~100 行新增
+| 方面 | v1.3 | v1.4（本版本） | 收益 |
+|------|------|----------------|------|
+| 消息格式 | `#Q1: 内容` | 纯文本 `内容` | 用户不需要输入前缀 |
+| 会话结构 | 单一聊天窗口 | 每个项目独立会话 | 清晰隔离，不会混淆 |
+| 路由依据 | Question ID + Session | 会话 ID → 项目 | 更自然 |
+| 用户体验 | 需要记住格式 | 直接回复 | 更简单 |
+| 复杂度 | ~100 行 | ~200 行 | 增加 100 行，换取更好 UX |
 
 ## 4. 接口契约
 
