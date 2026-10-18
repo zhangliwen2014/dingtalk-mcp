@@ -18,26 +18,26 @@ describe('core/switch', () => {
   });
 
   describe('read/write', () => {
-    it('defaults to enabled when no state file', () => {
+    it('defaults to enabled when no state file', async () => {
       const sw = new Switch();
-      expect(sw.isEnabled()).toBe(true);
+      expect(await sw.get()).toBe(true);
     });
 
-    it('persists enabled state', () => {
+    it('persists enabled state', async () => {
       const sw = new Switch();
-      sw.set(false);
-      
+      await sw.set(false);
+
       const sw2 = new Switch();
-      expect(sw2.isEnabled()).toBe(false);
+      expect(await sw2.get()).toBe(false);
     });
 
-    it('can toggle back to enabled', () => {
+    it('can toggle back to enabled', async () => {
       const sw = new Switch();
-      sw.set(false);
-      sw.set(true);
-      
+      await sw.set(false);
+      await sw.set(true);
+
       const sw2 = new Switch();
-      expect(sw2.isEnabled()).toBe(true);
+      expect(await sw2.get()).toBe(true);
     });
   });
 });

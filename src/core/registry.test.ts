@@ -3,7 +3,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Registry } from './registry.js';
-import { Question } from './question.js';
 
 describe('core/registry', () => {
   let tempDir: string;
@@ -21,12 +20,6 @@ describe('core/registry', () => {
   describe('ID allocation', () => {
     it('allocates sequential IDs starting from 1', () => {
       const registry = new Registry();
-      const q1 = Question.create({
-        text: 'q1',
-        options: [],
-        projectId: 'test',
-        timeoutMs: 45000
-      });
       const id1 = registry.allocateId();
       expect(id1).toBe(1);
 
@@ -38,15 +31,8 @@ describe('core/registry', () => {
   describe('pending management', () => {
     it('tracks pending questions', () => {
       const registry = new Registry();
-      const q = Question.create({
-        text: 'test',
-        options: [],
-        projectId: 'test',
-        timeoutMs: 45000
-      });
       const id = registry.allocateId();
-      q.markPending(id);
-      registry.add(q);
+      registry.add({ id, text: 'test', target: 'user1' });
 
       const pending = registry.listPending();
       expect(pending).toHaveLength(1);
@@ -55,18 +41,10 @@ describe('core/registry', () => {
 
     it('removes answered questions from pending', () => {
       const registry = new Registry();
-      const q = Question.create({
-        text: 'test',
-        options: [],
-        projectId: 'test',
-        timeoutMs: 45000
-      });
       const id = registry.allocateId();
-      q.markPending(id);
-      registry.add(q);
+      const q = registry.add({ id, text: 'test', target: 'user1' });
 
       q.accept('answer', 'phone');
-      registry.update(q);
 
       const pending = registry.listPending();
       expect(pending).toHaveLength(0);
@@ -74,15 +52,8 @@ describe('core/registry', () => {
 
     it('retrieves question by ID', () => {
       const registry = new Registry();
-      const q = Question.create({
-        text: 'test',
-        options: [],
-        projectId: 'test',
-        timeoutMs: 45000
-      });
       const id = registry.allocateId();
-      q.markPending(id);
-      registry.add(q);
+      registry.add({ id, text: 'test', target: 'user1' });
 
       const retrieved = registry.get(id);
       expect(retrieved).toBeDefined();
@@ -93,15 +64,8 @@ describe('core/registry', () => {
   describe('persistence', () => {
     it('persists state to disk', () => {
       const registry = new Registry();
-      const q = Question.create({
-        text: 'test',
-        options: [],
-        projectId: 'test',
-        timeoutMs: 45000
-      });
       const id = registry.allocateId();
-      q.markPending(id);
-      registry.add(q);
+      registry.add({ id, text: 'test', target: 'user1' });
       registry.save();
 
       const registry2 = new Registry();

@@ -7,11 +7,11 @@ const SWITCH_FILE = 'switch.json';
 export class Switch {
   private filePath: string;
 
-  constructor() {
-    this.filePath = path.join(paths.home(), SWITCH_FILE);
+  constructor(configDir?: string) {
+    this.filePath = path.join(configDir || paths.home(), SWITCH_FILE);
   }
 
-  isEnabled(): boolean {
+  async get(): Promise<boolean> {
     try {
       const data = fs.readFileSync(this.filePath, 'utf8');
       const state = JSON.parse(data);
@@ -21,7 +21,7 @@ export class Switch {
     }
   }
 
-  set(enabled: boolean): void {
+  async set(enabled: boolean): Promise<void> {
     const dir = path.dirname(this.filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as paths from '../platform/paths.js';
 import { Question, QuestionStatus } from './question.js';
+import * as identity from '../platform/identity.js';
 
 const STATE_FILE = 'state.json';
 
@@ -13,23 +14,22 @@ interface PersistedState {
 interface PersistedQuestion {
   id: number;
   text: string;
-  options: string[];
-  projectId: string;
-  timeoutMs: number;
   status: QuestionStatus;
   askedAt?: number;
   answer?: string;
   answeredVia?: 'phone' | 'terminal';
-  cancelReason?: string;
 }
 
 export class Registry {
   private nextId = 1;
   private questions: Map<number, Question> = new Map();
   private filePath: string;
+  readonly instanceId: string;
 
-  constructor() {
-    this.filePath = path.join(paths.home(), STATE_FILE);
+  constructor(configDir?: string) {
+    const dir = configDir || paths.home();
+    this.filePath = path.join(dir, STATE_FILE);
+    this.instanceId = identity.instanceId();
   }
 
   allocateId(): number {
@@ -38,18 +38,16 @@ export class Registry {
     return id;
   }
 
-  add(question: Question): void {
-    if (question.id === undefined) {
-      throw new Error('Question must have an ID before adding to registry');
-    }
-    this.questions.set(question.id, question);
-  }
-
-  update(question: Question): void {
-    if (question.id === undefined) {
-      throw new Error('Question must have an ID');
-    }
-    this.questions.set(question.id, question);
+  add(params: { id: number; text: string; target: string }): Question {
+    const question = Question.create({
+      text: params.text,
+      options: [],
+      projectId: '',
+      timeoutMs: 0,
+    });
+    question.markPending(params.id);
+    this.questions.set(params.id, question);
+    return question;
   }
 
   get(id: number): Question | undefined {
@@ -73,18 +71,15 @@ export class Registry {
       questions: Array.from(this.questions.values()).map((q) => ({
         id: q.id!,
         text: q.text,
-        options: q.options,
-        projectId: q.projectId,
-        timeoutMs: q.timeoutMs,
         status: q.status,
         askedAt: q.askedAt,
         answer: q.answer,
-        answeredVia: q.answeredVia
-      }))
+        answeredVia: q.answeredVia,
+      })),
     };
 
     fs.writeFileSync(this.filePath, JSON.stringify(state, null, 2), {
-      mode: 0o600
+      mode: 0o600,
     });
   }
 
@@ -98,14 +93,14 @@ export class Registry {
       for (const pq of state.questions) {
         const q = Question.create({
           text: pq.text,
-          options: pq.options,
-          projectId: pq.projectId,
-          timeoutMs: pq.timeoutMs
+          options: [],
+          projectId: '',
+          timeoutMs: 0,
         });
 
-        if (pq.status === QuestionStatus.PENDING && pq.id !== undefined) {
+        if (pq.status === QuestionStatus.PENDING) {
           q.markPending(pq.id);
-        } else if (pq.status === QuestionStatus.ANSWERED && pq.id !== undefined) {
+        } else if (pq.status === QuestionStatus.ANSWERED) {
           q.markPending(pq.id);
           if (pq.answer && pq.answeredVia) {
             q.accept(pq.answer, pq.answeredVia);

@@ -2,6 +2,8 @@ import { DingTransport, InboundMessage } from './ding-transport.js';
 import * as proc from '../platform/proc.js';
 
 export class DwsTransport implements DingTransport {
+  private messageHandler?: (message: InboundMessage) => void;
+
   async sendText(target: string, text: string): Promise<void> {
     const result = await proc.run([
       'dws',
@@ -21,10 +23,13 @@ export class DwsTransport implements DingTransport {
   }
 
   async listen(handler: (message: InboundMessage) => void): Promise<void> {
-    // TODO: Implement after V2 verification
-    // spawn `dws event +listen-im --kind all-direct --flatten -f ndjson`
-    // parse ndjson stream and call handler for each message
-    throw new Error('DwsTransport.listen not yet implemented (pending V2 verification)');
+    this.messageHandler = handler;
+  }
+
+  handleInbound(message: InboundMessage): void {
+    if (this.messageHandler) {
+      this.messageHandler(message);
+    }
   }
 
   async resolveTarget(name: string): Promise<string> {

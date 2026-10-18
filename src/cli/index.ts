@@ -5,8 +5,8 @@ import { Registry } from '../core/registry.js';
 import * as paths from '../platform/paths.js';
 import * as identity from '../platform/identity.js';
 import * as proc from '../platform/proc.js';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { Daemon } from '../daemon/index.js';
+import { startMcpServer } from '../mcp/index.js';
 
 async function main() {
   const command = process.argv[2];
@@ -16,18 +16,24 @@ async function main() {
       await runDoctor();
       break;
     case 'status':
-      runStatus();
+      await runStatus();
       break;
     case 'on':
-      new Switch().set(true);
+      await new Switch().set(true);
       console.log('✓ Push enabled');
       break;
     case 'off':
-      new Switch().set(false);
+      await new Switch().set(false);
       console.log('✓ Push disabled');
       break;
     case 'pending':
       runPending();
+      break;
+    case 'daemon':
+      await startDaemon();
+      break;
+    case 'mcp':
+      await startMcpServer();
       break;
     default:
       console.log(`Usage: dtmcp <command>
@@ -38,6 +44,8 @@ Commands:
   on        Enable push to DingTalk
   off       Disable push to DingTalk
   pending   List pending questions
+  daemon    Start the daemon server
+  mcp       Start the MCP server (for agent integration)
 `);
   }
 }
@@ -87,7 +95,8 @@ async function runDoctor() {
 
   // Check switch
   const sw = new Switch();
-  console.log(`✓ Push enabled: ${sw.isEnabled()}`);
+  const enabled = await sw.get();
+  console.log(`✓ Push enabled: ${enabled}`);
 
   // Check registry
   const registry = new Registry();
@@ -98,9 +107,10 @@ async function runDoctor() {
   console.log(`\nInstance ID: ${identity.instanceId()}`);
 }
 
-function runStatus() {
+async function runStatus() {
   const sw = new Switch();
-  console.log(`Push enabled: ${sw.isEnabled()}`);
+  const enabled = await sw.get();
+  console.log(`Push enabled: ${enabled}`);
 
   const registry = new Registry();
   registry.load();
@@ -110,7 +120,7 @@ function runStatus() {
   if (pending.length > 0) {
     console.log('\nPending:');
     for (const q of pending) {
-      console.log(`  Q${q.id}: ${q.text} (${q.projectId})`);
+      console.log(`  Q${q.id}: ${q.text}`);
     }
   }
 }
@@ -127,13 +137,24 @@ function runPending() {
 
   for (const q of pending) {
     console.log(`Q${q.id}: ${q.text}`);
-    if (q.options.length > 0) {
-      console.log(`  Options: ${q.options.join(', ')}`);
-    }
-    console.log(`  Project: ${q.projectId}`);
     console.log(`  Asked: ${new Date(q.askedAt!).toISOString()}`);
     console.log();
   }
+}
+
+async function startDaemon() {
+  const daemon = new Daemon();
+  await daemon.start();
+
+  process.on('SIGINT', async () => {
+    await daemon.stop();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    await daemon.stop();
+    process.exit(0);
+  });
 }
 
 main().catch((err) => {
