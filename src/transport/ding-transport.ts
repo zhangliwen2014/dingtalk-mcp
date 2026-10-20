@@ -1,12 +1,14 @@
 export interface DingTransport {
   sendText(target: string, text: string): Promise<void>;
-  listen(handler: (message: InboundMessage) => void): Promise<void>;
+  sendToGroupChat(chatId: string, text: string): Promise<void>;
+  pollGroupMessages(chatId: string): Promise<PolledGroupMessage[]>;
   resolveTarget(name: string): Promise<string>;
 }
 
-export interface InboundMessage {
+export interface PolledGroupMessage {
+  messageId: string;
+  content: string;
   senderId: string;
-  text: string;
-  conversationId: string;
   timestamp: number;
+  fromAgent: boolean;
 }

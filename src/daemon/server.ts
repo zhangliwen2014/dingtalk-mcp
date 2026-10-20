@@ -1,8 +1,11 @@
 import { Switch } from '../core/switch.js';
 import { Registry } from '../core/registry.js';
 import { DingTransport } from '../transport/ding-transport.js';
+import { ProjectChatManager } from '../core/project-chat-manager.js';
 import { route } from '../core/router.js';
 import { BlockedReason } from '../core/errors.js';
+import type { AgentRunner, RunnerProject } from './agent-runner.js';
+import type { SessionRegistry } from './session-registry.js';
 import * as net from 'net';
 import * as fs from 'fs';
 
@@ -11,20 +14,35 @@ export interface DaemonServerOptions {
   switch: Switch;
   registry: Registry;
   ipcEndpoint: string;
+  projectChatManager?: ProjectChatManager;
+  onChatCreated?: (chatId: string) => void;
+  agentRunner?: Pick<AgentRunner, 'enqueue'>;
+  sessionRegistry?: Pick<SessionRegistry, 'isActive' | 'ping' | 'leave'>;
+  headlessEnabled?: boolean;
 }
 
 export class DaemonServer {
   private server: net.Server | null = null;
   private transport: DingTransport;
   private switch: Switch;
-  private registry: Registry;
+  readonly registry: Registry;
   private ipcEndpoint: string;
+  private projectChatManager?: ProjectChatManager;
+  private onChatCreated?: (chatId: string) => void;
+  private agentRunner?: Pick<AgentRunner, 'enqueue'>;
+  private sessionRegistry?: Pick<SessionRegistry, 'isActive' | 'ping' | 'leave'>;
+  private headlessEnabled: boolean;
 
   constructor(options: DaemonServerOptions) {
     this.transport = options.transport;
     this.switch = options.switch;
     this.registry = options.registry;
     this.ipcEndpoint = options.ipcEndpoint;
+    this.projectChatManager = options.projectChatManager;
+    this.onChatCreated = options.onChatCreated;
+    this.agentRunner = options.agentRunner;
+    this.sessionRegistry = options.sessionRegistry;
+    this.headlessEnabled = options.headlessEnabled ?? false;
   }
 
   async start(): Promise<void> {
@@ -75,6 +93,24 @@ export class DaemonServer {
       case 'reply':
       case 'ingest':
         return this.handleIngest(params);
+      case 'chat_message':
+        return this.handleChatMessage(params);
+      case 'list_projects':
+        return this.handleListProjects(params);
+      case 'read_project_messages':
+        return this.handleReadProjectMessages(params);
+      case 'list_project_inboxes':
+        return this.handleListProjectInboxes(params);
+      case 'reply_to_project':
+        return this.handleReplyToProject(params);
+      case 'hook_ping':
+        return this.handleHookPing(params);
+      case 'hook_leave':
+        return this.handleHookLeave(params);
+      case 'hook_poll':
+        return this.handleHookPoll(params);
+      case 'hook_mirror':
+        return this.handleHookMirror(params);
       default:
         throw new Error(`Unknown RPC method: ${method}`);
     }
@@ -90,10 +126,11 @@ export class DaemonServer {
 
   private async handleAsk(params: {
     question: string;
-    target: string;
+    target?: string;
+    project_id?: string;
+    project_title?: string;
+    cwd?: string;
   }): Promise<any> {
-    console.log('[Ask] Starting, target:', params.target);
-    
     const enabled = await this.switch.get();
     if (!enabled) {
       return {
@@ -103,13 +140,73 @@ export class DaemonServer {
       };
     }
 
-    console.log('[Ask] Resolving target...');
-    const targetId = await this.transport.resolveTarget(params.target);
-    console.log('[Ask] Target resolved to:', targetId);
-    
     const id = this.registry.allocateId();
-    console.log('[Ask] Allocated ID:', id);
-    
+
+    if (this.projectChatManager && params.project_id) {
+      return this.handleProjectAsk(params, id);
+    }
+
+    return this.handleLegacyAsk(params, id);
+  }
+
+  private async handleProjectAsk(
+    params: {
+      question: string;
+      project_id?: string;
+      project_title?: string;
+      cwd?: string;
+    },
+    id: number
+  ): Promise<any> {
+    const projectId = params.project_id!;
+    const projectTitle = params.project_title || projectId;
+
+    const projectChat = await this.projectChatManager!.getOrCreateChat(
+      projectId,
+      projectTitle
+    );
+
+    if (params.cwd) {
+      this.projectChatManager!.setWorkdir(projectId, params.cwd);
+    }
+
+    const isNewChat = projectChat.questionIds.length === 0;
+
+    const question = this.registry.add({
+      id,
+      text: params.question,
+      target: projectChat.chatId,
+    });
+
+    projectChat.questionIds.push(id);
+
+    const message = `Q${id}: ${params.question}`;
+    await this.transport.sendToGroupChat(projectChat.chatId, message);
+
+    this.registry.save();
+
+    if (isNewChat && this.onChatCreated) {
+      this.onChatCreated(projectChat.chatId);
+    }
+
+    return {
+      ok: true,
+      status: 'pending',
+      id,
+      chatId: projectChat.chatId,
+    };
+  }
+
+  private async handleLegacyAsk(
+    params: {
+      question: string;
+      target?: string;
+    },
+    id: number
+  ): Promise<any> {
+    const target = params.target || 'self';
+    const targetId = await this.transport.resolveTarget(target);
+
     const question = this.registry.add({
       id,
       text: params.question,
@@ -117,12 +214,9 @@ export class DaemonServer {
     });
 
     const message = `#Q${id}: ${params.question}`;
-    console.log('[Ask] Sending message:', message);
     await this.transport.sendText(targetId, message);
-    console.log('[Ask] Message sent');
 
     this.registry.save();
-    console.log('[Ask] Registry saved');
 
     return {
       ok: true,
@@ -184,13 +278,8 @@ export class DaemonServer {
   }
 
   private async handleIngest(params: { text: string }): Promise<any> {
-    console.log('[Ingest] Received text:', params.text);
-    
     const pending = this.registry.listPending();
-    console.log('[Ingest] Pending questions:', pending.length);
-    
     const result = route(params.text, pending);
-    console.log('[Ingest] Route result:', result);
 
     if (result.kind === 'command') {
       if (result.cmd === 'enable') {
@@ -212,20 +301,245 @@ export class DaemonServer {
       if (question) {
         question.accept(result.text, 'phone');
         this.registry.save();
-        console.log('[Ingest] Answer accepted for Q' + result.id);
-      } else {
-        console.log('[Ingest] Question Q' + result.id + ' not found');
       }
       return { ok: true, routed: 'answer', id: result.id };
     }
 
     if (result.kind === 'ambiguous') {
-      console.log('[Ingest] Ambiguous - multiple pending questions');
       return { ok: false, error: 'ambiguous', routed: 'none' };
     }
 
-    console.log('[Ingest] No route matched');
     return { ok: true, routed: 'none' };
+  }
+
+  async handleChatMessage(params: {
+    chatId: string;
+    content: string;
+    senderId?: string;
+  }): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: false, error: 'no project chat manager' };
+    }
+
+    if (this.projectChatManager.wasSentByAgent(params.content)) {
+      return { ok: true, ignored: 'self' };
+    }
+
+    const projectChat = this.projectChatManager.getProjectByChatId(params.chatId);
+    if (!projectChat) {
+      return { ok: false, error: 'unknown chat' };
+    }
+
+    const pendingQuestion = projectChat.questionIds
+      .map((id) => this.registry.get(id))
+      .filter((q) => q && q.status === 'pending')
+      .pop();
+
+    if (!pendingQuestion) {
+      this.projectChatManager.addInboxMessage(
+        projectChat.projectId,
+        params.senderId || 'unknown',
+        params.content,
+        Date.now()
+      );
+
+      const workdir = projectChat.workdir;
+
+      if (workdir && this.sessionRegistry?.isActive(workdir)) {
+        await this.sendNotice(
+          params.chatId,
+          '已收到，将在电脑端 Agent 下一个动作时处理。'
+        );
+        return {
+          ok: true,
+          stored: 'inbox',
+          projectId: projectChat.projectId,
+          delivered: 'session',
+        };
+      }
+
+      if (workdir && this.headlessEnabled && this.agentRunner) {
+        const runnerProject: RunnerProject = {
+          projectId: projectChat.projectId,
+          projectTitle: projectChat.projectTitle,
+          chatId: projectChat.chatId,
+          workdir,
+        };
+        this.agentRunner.enqueue(runnerProject, params.content);
+        return {
+          ok: true,
+          stored: 'inbox',
+          projectId: projectChat.projectId,
+          dispatched: 'agent',
+        };
+      }
+
+      if (workdir) {
+        await this.sendNotice(
+          params.chatId,
+          '该项目的 qodercli 在电脑上未启动，消息已存收件箱。'
+        );
+        return {
+          ok: true,
+          stored: 'inbox',
+          projectId: projectChat.projectId,
+          delivered: 'queued',
+        };
+      }
+
+      await this.sendAck(params.chatId);
+      return { ok: true, stored: 'inbox', projectId: projectChat.projectId };
+    }
+
+    pendingQuestion.accept(params.content, 'phone');
+    this.registry.save();
+    await this.sendAck(params.chatId);
+
+    return { ok: true, id: pendingQuestion.id };
+  }
+
+  private async sendAck(chatId: string): Promise<void> {
+    const ack = '已收到你的消息，Agent 稍后回复。';
+    await this.sendNotice(chatId, ack);
+  }
+
+  private async sendNotice(chatId: string, text: string): Promise<void> {
+    try {
+      this.projectChatManager?.recordSentContent(text);
+      await this.transport.sendToGroupChat(chatId, text);
+    } catch (err) {
+      console.error('Failed to send notice:', err);
+    }
+  }
+
+  private handleHookPing(params: { session_id: string; cwd: string }): any {
+    this.sessionRegistry?.ping(params.session_id, params.cwd);
+    return { ok: true };
+  }
+
+  private handleHookLeave(params: { session_id: string }): any {
+    this.sessionRegistry?.leave(params.session_id);
+    return { ok: true };
+  }
+
+  private handleHookPoll(params: { cwd: string }): any {
+    if (!this.projectChatManager) {
+      return { ok: true, messages: [] };
+    }
+
+    const chat = this.projectChatManager.getProjectByWorkdir(params.cwd);
+    if (!chat) {
+      return { ok: true, messages: [] };
+    }
+
+    const claimed = this.projectChatManager.claimUnread(chat.projectId);
+    return {
+      ok: true,
+      projectId: chat.projectId,
+      messages: claimed.map((m) => ({
+        id: m.id,
+        content: m.content,
+        senderId: m.senderId,
+        timestamp: m.timestamp,
+      })),
+    };
+  }
+
+  private async handleHookMirror(params: {
+    cwd: string;
+    content: string;
+  }): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: true, mirrored: false };
+    }
+
+    const chat = this.projectChatManager.getProjectByWorkdir(params.cwd);
+    if (!chat) {
+      return { ok: true, mirrored: false };
+    }
+
+    const enabled = await this.switch.get();
+    if (!enabled) {
+      return { ok: true, mirrored: false };
+    }
+
+    const content = (params.content || '').trim();
+    if (!content) {
+      return { ok: true, mirrored: false };
+    }
+
+    if (this.projectChatManager.wasSentByAgent(content)) {
+      return { ok: true, mirrored: false };
+    }
+
+    this.projectChatManager.recordSentContent(content);
+    await this.transport.sendToGroupChat(chat.chatId, content);
+    return { ok: true, mirrored: true };
+  }
+
+  private async handleReplyToProject(params: { project_id: string; content: string }): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: false, error: 'no project chat manager' };
+    }
+
+    const chat = this.projectChatManager.getChatByProjectId(params.project_id);
+    if (!chat) {
+      return { ok: false, error: 'no chat for project' };
+    }
+
+    this.projectChatManager.recordSentContent(params.content);
+    await this.transport.sendToGroupChat(chat.chatId, params.content);
+
+    return { ok: true, chatId: chat.chatId };
+  }
+
+  private async handleReadProjectMessages(params: { project_id: string }): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: false, error: 'no project chat manager' };
+    }
+
+    const messages = this.projectChatManager.getUnreadMessages(params.project_id);
+    this.projectChatManager.markAsRead(params.project_id);
+
+    return {
+      ok: true,
+      projectId: params.project_id,
+      messages,
+    };
+  }
+
+  private async handleListProjectInboxes(params: {}): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: false, error: 'no project chat manager' };
+    }
+
+    const projects = this.projectChatManager.listProjectChats();
+    return {
+      ok: true,
+      projects: projects.map((p) => ({
+        projectId: p.projectId,
+        projectTitle: p.projectTitle,
+        chatId: p.chatId,
+        unreadCount: this.projectChatManager!.getUnreadCount(p.projectId),
+      })),
+    };
+  }
+
+  private async handleListProjects(params: {}): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: false, error: 'no project chat manager' };
+    }
+
+    const projects = this.projectChatManager.listProjectChats();
+    return {
+      ok: true,
+      projects: projects.map((p) => ({
+        projectId: p.projectId,
+        projectTitle: p.projectTitle,
+        chatId: p.chatId,
+        questionCount: p.questionIds.length,
+      })),
+    };
   }
 
   private handleConnection(socket: net.Socket): void {

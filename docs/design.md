@@ -1,7 +1,7 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v1.5（可行性验证完成，实时事件可用）
-日期：2026-10-18
+版本：v1.9（手机钉钉 = 电脑活会话的第二 I/O 通道，基于 qodercli hooks；无头处理降级为可选模式）
+日期：2026-10-19
 关联文档：[需求文档](./requirements.md)
 
 ---
@@ -303,160 +303,56 @@ async handleIngest(message: InboundMessage) {
 - ✓ 直接根据会话 ID 定位项目
 - ✓ 项目内最新 pending 问题自动获得答案
 
-### 3.5.6 实时事件监听（可行性已验证）
+### 3.5.6 消息摄入：3 秒轮询（v1.7 修订，替代事件监听）
 
-**验证结论（2026-10-18）：**
-- ✓ 实时事件监听**可以工作**
-- ✓ 使用 `dws event consume user_im_message_receive_group --group <chatId>`
-- ✓ 连接建立需要 3-5 秒，之后消息实时推送（延迟 <1 秒）
-- ✗ `dws event +listen-im` 不工作（已废弃）
+**为什么放弃 `dws event consume`：** 事件链路依赖 dws 的共享事件总线守护进程。实测发生过总线假死事故——总线状态自报 "connected"、消费者自报正常，但 `received` 计数 7.7 小时停在 0，手机上发的消息一条都没进来；重启 daemon 也没用（subscribe_id 是按参数确定性哈希的，重连复用同一条死订阅）。表面的"实时"建立在一条我们不可观测、不可自愈的推送链上。消息丢失对远程监控场景是致命的，因此整条替换为**轮询摄入**：可靠性和延迟都掌握在自己手里，只依赖一个可重复验证的读接口。
 
-**监听命令：**
+**摄入接口：**
+
 ```bash
-# 监听指定群聊的消息
-dws event consume user_im_message_receive_group \
-  --group <chatId> \
-  --flatten \
-  -f ndjson
+dws chat +chat-messages --group <chatId> --limit 50 -f json
 ```
 
-**输出格式（ndjson）：**
+返回字段中 `messageAiSendFlag === "DWS"` 标记 Agent 自己发出的消息（第一道回声防线）。
+
+**`daemon/chat-poller.ts` 设计：**
+
+- 每个项目群一个 3 秒定时器，调用 `pollGroupMessages(chatId)`。
+- **幂等消费（at-least-once → exactly-once 效果）**：按 `messageId` 判重，每群维护一个已见 ID 集合（容量上限 500）。
+- **基线化（baseline）**：daemon 重启后的首轮只把全部历史消息 ID 记为已见，不重放历史、不给旧消息发回执。
+- 跳过 `fromAgent` 消息与空内容；`onMessage` 异常只记日志，下轮继续。
+- 轮询失败（dws 报错）静默容忍，下一轮自动恢复——没有需要"重连"的持久状态。
+
+**架构原则：** 单条可靠数据路径优于"推送为主、轮询兜底"的双路径；脆弱的优化宁可删掉。延迟从 <1s 变为 ≤3s，对手机远程问答完全可接受。
+
+### 3.5.7 MCP 工具
+
+共 8 个工具。核心场景：Agent 提问 → 用户手机回复；以及用户外出时**主动**给项目 Agent 发消息、监控工作状态。
+
+#### `ask_on_dingtalk`
+
+向项目群发送问题并等待回复。
+
 ```json
-{
-  "type": "user_im_message_receive_group",
-  "event_id": "782b93da680542d9bd861d20b78311ed",
-  "timestamp": 1792337119863,
-  "subscribe_id": "subId-ebd1ba47faa1437092fde3b12fe9e0b8",
-  "message_id": "msggNobcfn3kGwW41TyZkeijg==",
-  "conversation_id": "cidcAiBlc9HORdYdKGT3IiZsA==",
-  "sender": "立文",
-  "sender_open_dingtalk_id": "DiPCkVk9snxeAlc5iiDTOTAPkRVmd6EYMXa",
-  "content": "保留备份",
-  "create_time": "2026-10-18 23:25:19",
-  "event_time": 1792337119491
-}
-```
-
-**关键字段：**
-- `conversation_id` - 用于匹配项目会话
-- `content` - 用户回复的内容
-- `sender` - 回复者姓名
-- `create_time` - 消息时间
-
-**Daemon 实现：**
-```typescript
-// daemon/index.ts
-
-class Daemon {
-  private eventProcesses: Map<string, ChildProcess> = new Map();  // chatId → process
-  
-  async startListeningForChat(chatId: string) {
-    if (this.eventProcesses.has(chatId)) {
-      return;  // 已在监听
-    }
-    
-    const proc = spawn('dws', [
-      'event', 'consume',
-      'user_im_message_receive_group',
-      '--group', chatId,
-      '--flatten',
-      '-f', 'ndjson'
-    ], {
-      stdio: ['ignore', 'pipe', 'pipe']
-    });
-    
-    proc.stdout.on('data', (data) => {
-      const lines = data.toString().split('\n');
-      for (const line of lines) {
-        if (line.trim()) {
-          try {
-            const event = JSON.parse(line);
-            this.handleGroupMessage(event);
-          } catch (err) {
-            // 忽略解析错误
-          }
-        }
-      }
-    });
-    
-    this.eventProcesses.set(chatId, proc);
-  }
-  
-  async handleGroupMessage(event: any) {
-    const chatId = event.conversation_id;
-    const content = event.content;
-    
-    // 根据 chatId 找到项目
-    const projectChat = this.projectChatManager.getProjectByChatId(chatId);
-    if (!projectChat) {
-      return;
-    }
-    
-    // 找到该项目的最新 pending 问题
-    const pendingQuestion = projectChat.questionIds
-      .map(id => this.registry.get(id))
-      .filter(q => q && q.status === 'pending')
-      .pop();
-    
-    if (!pendingQuestion) {
-      return;
-    }
-    
-    // 接受答案
-    pendingQuestion.accept(content, 'phone');
-    
-    // 通知等待的客户端
-    const waiting = this.waitingRequests.get(pendingQuestion.id);
-    if (waiting) {
-      waiting.resolve(content);
-    }
-  }
-  
-  async stop() {
-    for (const proc of this.eventProcesses.values()) {
-      proc.kill();
-    }
-    this.eventProcesses.clear();
-  }
-}
-```
-
-**优势（vs 轮询）：**
-- ✓ 延迟 <1 秒（轮询 3-6 秒）
-- ✓ 无 API 调用开销
-- ✓ 实时用户体验
-- ✓ 资源占用低
-
-**注意事项：**
-- 每个项目会话需要一个独立的 `dws event consume` 进程
-- 连接建立需要 3-5 秒，首次提问有冷启动延迟
-- 进程异常退出时需要自动重启
-
-### 3.5.7 MCP 工具更新
-
-#### `ask_on_dingtalk`（更新）
-
-输入新增：
-```json
-{
-  "question": "string，必填",
-  "target": "string，必填（用户 ID）",
-  "project_id": "string，选填，项目标识",
-  "project_title": "string，选填，项目标题（显示在会话名称中）"
-}
-```
-
-示例：
-```json
+// 输入（三项均必填）
 {
   "question": "保留备份还是删除？",
-  "target": "016825045624390379",
   "project_id": "website-rewrite",
   "project_title": "官网重构"
 }
 ```
 
-#### `list_projects`（新增）
+`project_id` 隔离不同项目的问题；`project_title` 显示在钉钉群名称（`{project_title}问答`）中。首次提问时自动创建/查找群并启动轮询；`ask` RPC 同时附带调用方 `cwd`，绑定为项目工作目录（见 §3.5.10）。
+
+#### `check_answer` / `cancel_question`
+
+按问题 ID 查询是否已回答、或取消挂起问题。
+
+#### `dingtalk_status`
+
+查询推送开关状态与挂起问题数。
+
+#### `list_projects`
 
 ```json
 // 输出
@@ -473,7 +369,62 @@ class Daemon {
 }
 ```
 
-### 3.5.8 会话创建与查找
+#### `read_project_messages`（新增）
+
+读取指定项目收件箱中的未读消息，并标记为已读。用于用户在没有 pending question 时**主动**发来的消息。
+
+```json
+// 输入
+{ "project_id": "website-rewrite" }
+
+// 输出
+{
+  "ok": true,
+  "projectId": "website-rewrite",
+  "messages": [
+    { "id": 1, "senderId": "user1", "content": "现在进展如何？", "timestamp": 1760000000000, "read": true }
+  ]
+}
+```
+
+#### `list_project_inboxes`（新增）
+
+列出所有项目的未读消息数，供 Agent 判断哪些项目有用户主动发来的消息需要处理。
+
+```json
+// 输出
+{
+  "projects": [
+    { "projectId": "website-rewrite", "projectTitle": "官网重构", "chatId": "cidXXX", "unreadCount": 2 }
+  ]
+}
+```
+
+#### `reply_to_project`（新增）
+
+向指定项目群推送消息。**双向用途**：
+1. 回答用户主动发来的收件箱消息；
+2. Agent 主动推送工作状态更新（用户外出时远程监控）。
+
+电脑端 CLI 输出保持不变，回复只推送到手机钉钉群。
+
+```json
+// 输入
+{ "project_id": "website-rewrite", "content": "已完成数据库迁移，下一步重建索引。" }
+
+// 输出
+{ "ok": true, "chatId": "cidXXX" }
+```
+
+### 3.5.8 主动消息、自动确认与回显过滤
+
+**消息路由：** 轮询收到群消息时，若该项目有 pending question，作为答案处理；否则存入项目收件箱（`inbox`，容量上限 100 条），再按 §3.5.10 的三分支路由：有活会话 → 提示"将在电脑端下一个动作时处理"（等 hook 认领）；无活会话且 `agent.headless=true` → 交给无头 Agent；无活会话且 headless 关（默认）→ 提示"该项目的 qodercli 在电脑上未启动"。项目未绑定工作目录时退化为占位回执 `已收到你的消息，Agent 稍后回复。`。
+
+**回显过滤（echo filter）：** Agent 自己发到群里的消息会被下一轮轮询重新读到，形成 ack→收件箱→ack 的无限循环。三道防线：① 轮询侧按 `messageAiSendFlag === "DWS"` 跳过自己发的消息（§3.5.6）；② `ProjectChatManager.recordSentContent` 记录 Agent 发出的每条内容（保留最近 100 条），回流时 `wasSentByAgent` 判重忽略；③ 按 `messageId` 幂等去重，同一条消息不会被消费两次。
+
+**持久化与接收恢复：** `ProjectChat` 映射、收件箱与工作目录（`workdir`）持久化到 `project-chats.json`；daemon 启动时 `load()`，为每个已存在的项目群自动启动轮询，重启后无需重新提问即可继续接收主动消息。
+
+### 3.5.9 会话创建与查找
 
 ```typescript
 // core/project-chat-manager.ts
@@ -540,39 +491,97 @@ class ProjectChatManager {
 }
 ```
 
-### 3.5.9 模块更新
+### 3.5.10 手机 ↔ 电脑活会话双通道（Hook 架构）
+
+**用户模型：** 手机钉钉是**同一个 Agent 会话的第二个输入/输出通道**（电脑终端是第一个）。开启开关后即出现两条 I/O 通道，共享同一份完整会话历史。**规则：只有项目的 qodercli 在电脑上已启动，手机才能控制和交互**；未启动 → 手机收到明确提示"该项目的 qodercli 在电脑上未启动"。
+
+**已实测验证的前提：**
+- qodercli hooks（与 Claude Code 同构）：项目级 `settings.json` 的 `hooks` 会被加载；`PostToolUse` 在真实工具边界触发，stdout JSON 的 `additionalContext` **确实进入模型上下文**（Agent 复述了注入暗号）。
+- hook stdin 载荷完备：`session_id / transcript_path / cwd / hook_event_name / tool_name / tool_response`；`Stop` 事件额外带 `last_assistant_message`。
+
+**架构：**
+
+1. **Hook 安装器 `dtmcp install-hooks`（用户级一次性）** — `cli/install-hooks.ts`：外科手术式合并 `~/.qoder/settings.json` 的 `hooks` 键（保留其他配置与用户已有 hooks；幂等：先按命令特征清除旧 dtmcp 条目再写）。为 `SessionStart / PostToolUse(matcher *) / UserPromptSubmit / Stop / SessionEnd` 注册 `dtmcp hook`（`dtmcp` 不在 PATH 时回退 `node <abs dist/cli/index.js> hook`）。覆盖前自动备份 `settings.json.bak`。**生效需重启电脑端 CLI。**
+2. **`dtmcp hook` 子命令** — `cli/hook.ts` 的 `runHook(input, rpc, env)`：读 stdin JSON → 经 daemon IPC（失败静默、绝不打断 CLI 会话）分发。环境变量 `DTMCP_HEADLESS=1`（无头 runner spawn 注入）→ 全部 no-op，防止无头会话被登记/镜像/认领（递归保护）。
+   - `SessionStart` → `hook_ping`（登记活会话）。
+   - `SessionEnd` → `hook_leave`（注销）。
+   - `PostToolUse` / `UserPromptSubmit` → `hook_ping`（续活）+ `hook_poll`（认领该 cwd 对应项目的未读手机消息）→ 有则输出 `additionalContext`："手机钉钉发来新消息（视作用户补充指令），逐条处理并在最终回复说明结果（最终回复会自动转发到手机）：\n- …"。
+   - `Stop` → `hook_mirror`（把 `last_assistant_message` 推回该项目钉钉群；开关关/内容为空/是自己发的 → 不推）。
+3. **活会话登记表 `daemon/session-registry.ts`** — `ping(sessionId, cwd)` upsert `{cwd, lastSeen}`；`leave(sessionId)` 删除；`isActive(cwd)` = 存在 `lastSeen < STALE_MS`（默认 2h，容忍超长工具调用；崩溃残留靠过期自愈）的记录。
+4. **认领 `project-chat-manager.claimUnread(projectId)`** — 返回未读并标记已读，先到先得（多会话同目录只有一方拿到）。`getProjectByWorkdir(workdir)` 供 hook RPC 由 cwd 反查项目。
+
+**路径规范化（实测踩坑）：** macOS 上 `/tmp` 是 `/private/tmp` 的符号链接——`process.cwd()` 可能给出链接形式，而 qodercli hook 载荷里的 cwd 是真实路径。所有 workdir/cwd 比较（`getProjectByWorkdir`、`SessionRegistry.isActive`）都经 `platform/paths.resolveDir()`（`fs.realpathSync`，路径不存在时原样返回）两侧归一化，旧持久化数据无需迁移。
+
+**inbox 到达三分支（`server.ts` chat_message，无 pending question 时）：**
+1. 有 `workdir` 且 `sessionRegistry.isActive(workdir)` → 推手机"已收到，将在电脑端 Agent 下一个动作时处理。"（等 hook 认领注入），`delivered: 'session'`。
+2. 无活会话且 `headlessEnabled` 且 `agentRunner` → `enqueue` 无头处理（见下），`dispatched: 'agent'`。
+3. 无活会话且 headless 关（**默认**）→ 推手机"该项目的 qodercli 在电脑上未启动，消息已存收件箱。"，`delivered: 'queued'`。
+4. 无 `workdir` → 退化为占位回执（legacy ack）。
+
+**新增 RPC：** `hook_ping / hook_leave / hook_poll / hook_mirror`（含 cwd 的由 daemon 反查 projectId）。
+
+**注入时机限制：** 消息只在**工具边界**注入活会话；会话空闲等待输入时消息滞留收件箱，直到下一次工具调用/提交提示才被认领（提示语已说明）。
+
+### 3.5.10.1 无头 Agent 处理链路（可选模式，`agent.headless=true` 才启用）
+
+保留早期实现作为**无活会话时的代班执行者**，默认关闭。解析优先级 `env DTMCP_AGENT_HEADLESS > config.json agent.headless > false`。
+
+**模块 `daemon/agent-runner.ts`：**
+
+- `enqueue(project{projectId,title,chatId,workdir}, content)`，**全局串行队列**——同时最多 1 个 Agent 运行，防止 token 风暴与并发 git 冲突；处理中新到达的消息排队，逐条各得一份答复。
+- 单次运行：
+  1. **延迟 ack**：`ackDelayMs`（默认 15s）内完成 → 只发最终结果，无中间噪音；超过则发"收到，正在处理，完成后推送结果。"
+  2. spawn `qodercli -p <消息原文> -w <workdir> --output-format json --strict-mcp-config --append-system-prompt <框架提示> [权限参数]`，注入 `env.DTMCP_HEADLESS=1`（使本次运行内的 hooks 全部 no-op）；`--strict-mcp-config` 不加载任何 MCP，杜绝无头 Agent 反向调用 dingtalk 工具造成递归。
+  3. 解析 stdout 中 `type === "result"` 的行：成功 → 推送 `result`（超 `maxLen` 截断并加"…（已截断，详见电脑端）"）；`is_error` 或解析失败 → 推送"处理失败：<摘要>"。
+  4. 超时（默认 15 分钟）→ kill 子进程并推送"处理超时，请在电脑端查看"。
+- runner 发出的所有文本经 `recordSentContent` 登记，与 §3.5.8 回显过滤双保险。
+- daemon `stop()` 时清空队列、kill 当前子进程，且被 kill 的运行**不再投递结果**。
+
+**权限模式（可配置，默认完全自主）：** 解析优先级 `option > env DTMCP_AGENT_PERMISSION_MODE > config.json agent.permissionMode > 'full'`。`full`=`--dangerously-skip-permissions`，`read-only`=`--tools read grep glob`，`accept-edits`=`--permission-mode accept_edits`。
+
+信任边界：无论活会话还是无头模式，手机钉钉群都等于电脑被执行入口；账号/群泄露即电脑被操控（用户已知晓并选择）。
+
+**工作目录绑定：** 薄客户端（`mcp/mcp-server.ts`）在 `ask` RPC 中自动附带 `cwd: process.cwd()`；daemon 侧 `handleProjectAsk` 每次提问将 cwd 写入 `ProjectChat.workdir`（后续提问可重绑），随 `project-chats.json` 持久化。双通道认领与无头执行都以此为键。
+
+### 3.5.11 模块更新
 
 新增模块：
 ```
 src/
   core/
-    project-chat-manager.ts  ← 项目会话管理（新增）
+    project-chat-manager.ts  ← 项目会话管理（含收件箱、workdir 绑定、claimUnread、回声登记）
+  daemon/
+    chat-poller.ts           ← 3 秒轮询摄入（messageId 幂等、基线化、fromAgent 过滤）
+    agent-runner.ts          ← 无头 Agent 处理链路（可选模式：串行队列、延迟 ack、超时、权限模式、DTMCP_HEADLESS）
+    session-registry.ts      ← 活会话登记表（ping/leave/isActive、2h 过期自愈）
+  cli/
+    hook.ts                  ← dtmcp hook：stdin JSON → IPC 分发（注入 additionalContext / Stop 镜像 / DTMCP_HEADLESS 短路）
+    install-hooks.ts         ← settings.json hooks 键外科手术合并（幂等、备份、保留用户配置）
 ```
 
 更新模块：
 ```
-daemon/server.ts             ← 持有 ProjectChatManager
-transport/dws-transport.ts   ← 支持按会话监听
-mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title
+daemon/server.ts             ← 持有 ProjectChatManager + SessionRegistry + headlessEnabled；chat_message 三分支路由；hook_ping/leave/poll/mirror RPC
+daemon/index.ts              ← 构造 runner 与 poller，随消息生命周期接线
+transport/dws-transport.ts   ← pollGroupMessages（dws chat +chat-messages）
+mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title，RPC 附带 cwd
 ```
 
-### 3.5.10 向后兼容
+### 3.5.12 向后兼容
 
 - 不传 `project_id` / `project_title` → 使用默认项目"默认项目问答"
 - 单项目场景 → 行为与 v1.3 相同（只有一个会话）
-- 现有测试 → 保持不变
+- `project-chats.json` 旧文件缺 `workdir` / `inbox` 字段 → `load()` 容忍，缺省 undefined / 空数组
 
-### 3.5.11 实施计划
+### 3.5.13 实施计划
 
-**阶段 1（当前）：项目会话管理 + 实时监听**
+**阶段 1（已完成）：项目会话管理 + 轮询摄入 + 无头处理**
 - 实现 `ProjectChatManager`
-- 实现 `dws event consume` 实时监听
-- 更新 `daemon/server.ts` 支持项目会话
+- 实现 `ChatPoller` 轮询摄入（替代事件监听，见 §3.5.6）
+- 实现 `AgentRunner` 无头处理链路与 workdir 绑定（见 §3.5.10）
 - 更新 MCP 工具接口
-- 测试：多项目并发，验证实时接收
 
 **阶段 2：可靠性增强**
-- 添加监听进程自动重启
 - 添加超时机制（问题 45 秒未回答自动 expire）
 - 添加会话自动清理（30 天不活跃）
 
@@ -580,7 +589,7 @@ mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title
 - 项目标题智能推断（从 git remote / package.json）
 - 会话历史记录查询
 
-### 3.5.12 与 v1.3 的对比
+### 3.5.14 与 v1.3 的对比
 
 | 方面 | v1.3 | v1.4（本版本） | 收益 |
 |------|------|----------------|------|
@@ -649,9 +658,9 @@ mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title
 请求：`{"id":1,"method":"ask","params":{...}}`
 响应：`{"id":1,"result":{...}}` 或 `{"id":1,"error":{"code":"...","message":"..."}}`
 
-方法集合与 MCP 工具一一对应（`ask` / `check` / `cancel` / `status` / `reply` / `set_switch`），外加两个内部方法：`hello`（版本握手，客户端据此判断能否 `{"method":"spawn"}` 自行拉起 daemon）、`ingest`（transport 把入站消息喂进 core）。
+方法集合与 MCP 工具对应（`ask` / `check` / `cancel` / `status` / `list_projects` / `read_project_messages` / `list_project_inboxes` / `reply_to_project` / `reply` / `set_switch`），外加内部方法：`hello`（版本握手，客户端据此判断能否 `{"method":"spawn"}` 自行拉起 daemon）、`ingest`（transport 把入站消息喂进 core）、`chat_message`（轮询回流，路由答案、写入收件箱并按三分支处理，见 §3.5.8、§3.5.10）、`hook_ping` / `hook_leave` / `hook_poll` / `hook_mirror`（`dtmcp hook` 子命令使用：活会话登记/注销、认领未读手机消息注入活会话、Stop 最终回复镜像回手机）。
 
-多出的两个方法说明 **MCP 工具集合 ≠ daemon RPC 集合**：`reply` 给 CLI 用，`set_switch` 给 CLI 和手机端指令共用，`hello`/`spawn`/`ingest` 是纯内部。这是有意的分层——MCP 面只暴露 agent 需要的四个动作，其余留在本机。
+这是有意的分层——MCP 面只暴露 agent 需要的动作，其余（`hello`/`spawn`/`ingest`/`chat_message`/`set_switch`）留在本机或由 daemon 内部调用。
 
 ### 4.3 CLI 命令
 
@@ -907,8 +916,8 @@ CI 矩阵：GitHub Actions，`[macos-latest, windows-latest, ubuntu-latest] × [
 |---|---|---|---|---|
 | V1 | `dws chat +dm --to <本人姓名>` 能否把消息发给自己 | `target.type`；FR1 消息形态 | **已通过**（2026-10-18，macOS） | 退化目标为每人自己的私人会话，禁止共享群（FR11） |
 | V1b | `dws auth login` 与安装脚本可用 | 附录 B 的准备步骤 | **已通过**（macOS） | Windows 侧另需 `install.ps1` + `--device` 登录验证 |
-| V2 | `dws event +listen-im --kind all-direct` 是否实时收到发给本人的单聊消息；入站结构里发送者、正文、会话 ID 的真实字段名 | `DwsTransport.listen` 的实现；§6.1 推送式接收 | **待验证** | 退化为 `+chat-messages --start` 轮询，重估 NFR9 延迟预算 |
-| V3 | 同一账号两个 `dws event consume` 订阅同一 EventKey 是 fan-out 还是互抢 | NFR5 单实例是建议还是硬约束 | **待验证** | 单 daemon 架构无论如何保留（跨客户端开关状态同样必需） |
+| V2 | `dws event +listen-im --kind all-direct` 是否实时收到发给本人的单聊消息；入站结构里发送者、正文、会话 ID 的真实字段名 | `DwsTransport.listen` 的实现；§6.1 推送式接收 | **已验证后弃用**：`+listen-im` 不工作；`event consume` 可用但共享总线存在假死（自报 connected、received 恒 0、重启复用死订阅），消息丢失不可接受 | 已按预案退化为 `+chat-messages` 3 秒轮询（§3.5.6），摄入链路不再有持久连接状态 |
+| V3 | 同一账号两个 `dws event consume` 订阅同一 EventKey 是 fan-out 还是互抢 | NFR5 单实例是建议还是硬约束 | **不再关键**：摄入已不依赖事件订阅；subscribe_id 为参数确定性哈希，重启复用同订阅 | 单 daemon 架构保留（跨客户端开关状态同样必需） |
 | V4 | 中文正文经 Windows 进程参数传给 `dws` 是否乱码 | 发送是否需改走临时文件/stdin（D9） | **待验证**（需 Windows 机器或 CI runner） | 临时文件通路已作为 `dtmcp ask --file` 预留，改一个文件 |
 | V5 | Windows 上 `%APPDATA%` 隔离与命名管道名唯一性是否成立；`platform/paths` 的 Windows 分支 | NFR8、FR11 第 3 层 | **待验证**（CI 可覆盖路径推导，端到端需真机） | 端点名追加 PID 或哈希后缀，或改回 AF_UNIX（Win10 1803+） |
 
@@ -976,3 +985,7 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
 |---|---|---|
 | v1.0 | 2026-10-18 | 初版：选型、架构、接口、状态机 |
 | v1.1 | 2026-10-18 | 增 macOS/Windows/Linux 三端与 npm 分发：新增 `platform/` 层与「不得读 `process.platform`」边界规则；IPC 由「Unix socket」改为「POSIX socket / Windows 命名管道」双实现；单实例判定从 PID+flock 改为 bind 探测；新增 FR10 `doctor`、FR11 多使用者隔离、§8.2 聊天留存知情说明、§13 仓库与分发形态、V4/V5 验证项。V1 实测通过（本人单聊可用），V2/V3/V4/V5 待验 |
+| v1.2–v1.6 | 2026-10-18/19 | 多项目支持演进：v1.3 引入 Session 隔离；v1.4 改为每项目独立钉钉群（`{project_title}问答`），路由按会话 ID 定位项目、免 `#Q1:` 前缀；v1.5 实测确认 `dws event consume` 实时接收可用；v1.6 支持手机主动发消息、项目收件箱、自动确认与回显过滤（8 个 MCP 工具） |
+| v1.7 | 2026-10-19 | 摄入架构替换：dws 事件总线发生假死事故（自报 connected 但 received 恒 0，重启无效），整条改为 `ChatPoller` 3 秒轮询 + messageId 幂等 + 重启基线化（§3.5.6）。新增无头 Agent 处理链路 `AgentRunner`（§3.5.10）：手机主动消息由 `qodercli -p --strict-mcp-config` 按 CLI 同等语义处理，只回推最终结果；15s 延迟 ack、15min 超时、结果截断；权限模式可配置（默认 full，`read-only`/`accept-edits` 可选）。workdir 绑定：ask RPC 附带 `cwd`，随 `project-chats.json` 持久化 |
+| v1.8 | 2026-10-19 | 架构评审 + 实测驱动转向：无头运行零记忆（手机发 "continue" 得到"没有可续的任务"），根因是上下文挂在会话而非项目。实测验证 qodercli hooks（与 Claude Code 同构）的 `additionalContext` 能进入模型上下文、`Stop` 事件带 `last_assistant_message`，`remote-control`/`--teleport` 为云中介无本地注入路径（否决）。会话树状 JSONL 并发写入会孤儿化分支（否决 "-r 写入 PC 活动文件" 方案） |
+| v1.9 | 2026-10-20 | 手机 ↔ 电脑活会话双通道（Hook 架构，§3.5.10 重写）：手机钉钉作为同一 Agent 会话的第二 I/O 通道。`dtmcp install-hooks` 外科手术合并 `~/.qoder/settings.json` hooks（幂等、备份、保留用户配置）；`dtmcp hook` 子命令经 IPC 分发——`SessionStart/PostToolUse/UserPromptSubmit` 认领未读手机消息并注入 `additionalContext`，`Stop` 镜像最终回复回手机，`SessionEnd` 注销。`session-registry.ts` 活会话登记（2h 过期自愈）；`claimUnread` 先到先得。inbox 到达改三分支路由：有活会话→提示下一步处理；无会话且 `agent.headless=true`→无头代班；默认关→"qodercli 在电脑上未启动"。无头 runner spawn 注入 `DTMCP_HEADLESS=1` 使 hooks no-op（递归保护）。`agent.headless` 解析：env > config.json > false |

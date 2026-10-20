@@ -19,23 +19,22 @@ describe('transport/fake-transport', () => {
     expect(resolved).toBe('user123');
   });
 
-  it('simulates inbound messages', async () => {
+  it('returns copies of preset group messages', async () => {
     const transport = new FakeTransport();
-    const received: any[] = [];
+    transport.setGroupMessages([
+      {
+        messageId: 'm1',
+        content: 'answer',
+        senderId: 'user1',
+        timestamp: Date.now(),
+        fromAgent: false,
+      },
+    ]);
 
-    await transport.listen((msg) => {
-      received.push(msg);
-    });
-
-    transport.simulateInbound({
-      senderId: 'user1',
-      text: 'answer',
-      conversationId: 'conv1',
-      timestamp: Date.now(),
-    });
-
-    expect(received).toHaveLength(1);
-    expect(received[0].text).toBe('answer');
+    const polled = await transport.pollGroupMessages('chat-1');
+    expect(polled).toHaveLength(1);
+    expect(polled[0].content).toBe('answer');
+    expect(polled).not.toBe(transport.groupMessages);
   });
 
   it('clears sent messages', async () => {

@@ -1,16 +1,28 @@
-import { DingTransport, InboundMessage } from './ding-transport.js';
+import {
+  DingTransport,
+  PolledGroupMessage,
+} from './ding-transport.js';
 
 export class FakeTransport implements DingTransport {
   sentMessages: Array<{ target: string; text: string }> = [];
-  private messageHandler?: (message: InboundMessage) => void;
+  sentGroupMessages: Array<{ chatId: string; text: string }> = [];
+  groupMessages: PolledGroupMessage[] = [];
   private resolveTargetResult = 'fake-target';
 
   async sendText(target: string, text: string): Promise<void> {
     this.sentMessages.push({ target, text });
   }
 
-  async listen(handler: (message: InboundMessage) => void): Promise<void> {
-    this.messageHandler = handler;
+  async sendToGroupChat(chatId: string, text: string): Promise<void> {
+    this.sentGroupMessages.push({ chatId, text });
+  }
+
+  async pollGroupMessages(_chatId: string): Promise<PolledGroupMessage[]> {
+    return [...this.groupMessages];
+  }
+
+  setGroupMessages(messages: PolledGroupMessage[]): void {
+    this.groupMessages = messages;
   }
 
   async resolveTarget(name: string): Promise<string> {
@@ -21,13 +33,8 @@ export class FakeTransport implements DingTransport {
     this.resolveTargetResult = target;
   }
 
-  simulateInbound(message: InboundMessage): void {
-    if (this.messageHandler) {
-      this.messageHandler(message);
-    }
-  }
-
   clear(): void {
     this.sentMessages = [];
+    this.sentGroupMessages = [];
   }
 }

@@ -1,5 +1,6 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 export function home(): string {
   if (process.env.DTMCP_HOME) {
@@ -27,4 +28,12 @@ export function ipcEndpoint(): string {
     return `\\\\.\\pipe\\dtmcp-${process.pid}`;
   }
   return path.join(home(), 'dtmcp.sock');
+}
+
+export function resolveDir(dir: string): string {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return dir;
+  }
 }

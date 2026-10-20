@@ -4,9 +4,61 @@ import { Switch } from '../core/switch.js';
 import { Registry } from '../core/registry.js';
 import * as paths from '../platform/paths.js';
 import * as identity from '../platform/identity.js';
+import * as ipc from '../platform/ipc.js';
 import * as proc from '../platform/proc.js';
 import { Daemon } from '../daemon/index.js';
 import { startMcpServer } from '../mcp/index.js';
+import { IpcClient } from '../daemon/client.js';
+import { runHook, type HookInput } from './hook.js';
+import { installHooksFile } from './install-hooks.js';
+import * as os from 'node:os';
+import * as nodePath from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+async function readStdin(timeoutMs: number): Promise<string> {
+  return new Promise((resolve) => {
+    let data = '';
+    const done = () => {
+      clearTimeout(timer);
+      resolve(data);
+    };
+    const timer = setTimeout(done, timeoutMs);
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on('end', done);
+    process.stdin.on('error', done);
+  });
+}
+
+async function runHookCommand(): Promise<void> {
+  try {
+    if (process.env.DTMCP_HEADLESS) {
+      return;
+    }
+
+    const raw = await readStdin(1500);
+    if (!raw.trim()) {
+      return;
+    }
+
+    const input = JSON.parse(raw) as HookInput;
+    const ipcEndpoint = ipc.endpoint(identity.instanceId());
+    const client = new IpcClient(ipcEndpoint);
+    await client.connect();
+    try {
+      const output = await runHook(input, client, process.env);
+      if (output) {
+        process.stdout.write(output);
+      }
+    } finally {
+      await client.disconnect();
+    }
+  } catch {
+    // Hooks must never break or slow down the CLI session.
+  }
+}
 
 async function main() {
   const command = process.argv[2];
@@ -35,6 +87,12 @@ async function main() {
     case 'mcp':
       await startMcpServer();
       break;
+    case 'hook':
+      await runHookCommand();
+      break;
+    case 'install-hooks':
+      await runInstallHooks();
+      break;
     default:
       console.log(`Usage: dtmcp <command>
 
@@ -45,9 +103,28 @@ Commands:
   off       Disable push to DingTalk
   pending   List pending questions
   daemon    Start the daemon server
-  mcp       Start the MCP server (for agent integration)
+  mcp         Start the MCP server (for agent integration)
+  hook        Run as a qodercli hook (internal)
+  install-hooks Register dtmcp hooks into ~/.qoder/settings.json
 `);
   }
+}
+
+async function runInstallHooks() {
+  const settingsPath = nodePath.join(os.homedir(), '.qoder', 'settings.json');
+
+  let command = 'dtmcp hook';
+  const which = await proc.run(['which', 'dtmcp']);
+  if (which.code !== 0) {
+    const selfPath = fileURLToPath(import.meta.url);
+    command = `node ${JSON.stringify(selfPath)} hook`;
+  }
+
+  installHooksFile(settingsPath, command);
+  console.log(`✓ Hooks registered in ${settingsPath}`);
+  console.log(`  command: ${command}`);
+  console.log('  A backup was written as settings.json.bak (if the file existed).');
+  console.log('  Restart any running qodercli sessions to pick up the hooks.');
 }
 
 async function runDoctor() {

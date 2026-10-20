@@ -47,5 +47,47 @@ describe('daemon/single-instance', () => {
       await si1.release();
       await si2.release();
     });
+
+    it('writes the holder pid into the lock directory', async () => {
+      const si = new SingleInstance('pid-instance');
+      await si.tryAcquire();
+
+      const pid = Number(
+        fs.readFileSync(path.join(tempDir, '.lock-pid-instance', 'pid'), 'utf8')
+      );
+      expect(pid).toBe(process.pid);
+
+      await si.release();
+    });
+
+    it('steals a lock whose pid is dead', async () => {
+      const lockDir = path.join(tempDir, '.lock-stale');
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(path.join(lockDir, 'pid'), '999999999');
+
+      const si = new SingleInstance('stale');
+      expect(await si.tryAcquire()).toBe(true);
+      await si.release();
+    });
+
+    it('refuses a lock held by a live pid', async () => {
+      const lockDir = path.join(tempDir, '.lock-live');
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(path.join(lockDir, 'pid'), String(process.pid));
+
+      const si = new SingleInstance('live');
+      expect(await si.tryAcquire()).toBe(false);
+
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    });
+
+    it('treats a pid-less legacy lock as stale (migration path)', async () => {
+      const lockDir = path.join(tempDir, '.lock-legacy');
+      fs.mkdirSync(lockDir);
+
+      const si = new SingleInstance('legacy');
+      expect(await si.tryAcquire()).toBe(true);
+      await si.release();
+    });
   });
 });

@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as paths from './paths.js';
 
 describe('platform/paths', () => {
@@ -54,6 +57,27 @@ describe('platform/paths', () => {
       expect(endpoint).toContain('dtmcp.sock');
       
       Object.defineProperty(process, 'platform', { value: originalPlatform });
+    });
+  });
+
+  describe('resolveDir()', () => {
+    it('resolves a symlinked directory to its real path', () => {
+      const realDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dtmcp-real-'));
+      const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'dtmcp-link-'));
+      const linkPath = path.join(parent, 'alias');
+      fs.symlinkSync(realDir, linkPath, 'dir');
+
+      const resolved = paths.resolveDir(linkPath);
+
+      expect(resolved).toBe(fs.realpathSync(realDir));
+
+      fs.rmSync(parent, { recursive: true, force: true });
+      fs.rmSync(realDir, { recursive: true, force: true });
+    });
+
+    it('returns the input unchanged for a non-existent path', () => {
+      const missing = path.join(os.tmpdir(), 'dtmcp-does-not-exist-xyz');
+      expect(paths.resolveDir(missing)).toBe(missing);
     });
   });
 });

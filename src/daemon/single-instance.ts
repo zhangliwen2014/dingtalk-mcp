@@ -19,6 +19,30 @@ export class SingleInstance {
 
       fs.mkdirSync(this.lockDir);
       this.acquired = true;
+      fs.writeFileSync(path.join(this.lockDir, 'pid'), String(process.pid));
+      return true;
+    } catch {
+      return this.reclaimStaleLock();
+    }
+  }
+
+  private reclaimStaleLock(): boolean {
+    let pid: number | null = null;
+    try {
+      pid = parseInt(fs.readFileSync(path.join(this.lockDir, 'pid'), 'utf8'), 10);
+    } catch {
+      // No pid file — a lock left by a pre-PID version; treat as stale.
+    }
+
+    if (pid !== null && Number.isFinite(pid) && isProcessAlive(pid)) {
+      return false;
+    }
+
+    try {
+      fs.rmSync(this.lockDir, { recursive: true, force: true });
+      fs.mkdirSync(this.lockDir);
+      this.acquired = true;
+      fs.writeFileSync(path.join(this.lockDir, 'pid'), String(process.pid));
       return true;
     } catch {
       return false;
@@ -28,11 +52,20 @@ export class SingleInstance {
   async release(): Promise<void> {
     if (this.acquired) {
       try {
-        fs.rmdirSync(this.lockDir);
+        fs.rmSync(this.lockDir, { recursive: true, force: true });
         this.acquired = false;
       } catch {
         // Ignore cleanup errors
       }
     }
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
