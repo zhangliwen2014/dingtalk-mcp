@@ -10,6 +10,7 @@ import { Daemon } from '../daemon/index.js';
 import { startMcpServer } from '../mcp/index.js';
 import { IpcClient } from '../daemon/client.js';
 import { runHook, type HookInput } from './hook.js';
+import { runCommand } from './run.js';
 import { installHooksFile } from './install-hooks.js';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -93,6 +94,9 @@ async function main() {
     case 'install-hooks':
       await runInstallHooks();
       break;
+    case 'run':
+      await runCommand(process.argv.slice(3));
+      break;
     default:
       console.log(`Usage: dtmcp <command>
 
@@ -104,8 +108,9 @@ Commands:
   pending   List pending questions
   daemon    Start the daemon server
   mcp         Start the MCP server (for agent integration)
-  hook        Run as a qodercli hook (internal)
-  install-hooks Register dtmcp hooks into ~/.qoder/settings.json
+  hook           Run as a qodercli hook (internal)
+  install-hooks  Register dtmcp hooks into ~/.qoder/settings.json
+  run            Launch qodercli inside a PTY with phone-message injection
 `);
   }
 }

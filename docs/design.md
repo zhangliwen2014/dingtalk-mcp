@@ -1,7 +1,7 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v1.9（手机钉钉 = 电脑活会话的第二 I/O 通道，基于 qodercli hooks；无头处理降级为可选模式）
-日期：2026-10-19
+版本：v2.0（新增 `dtmcp run` PTY 包装器：活会话空闲时手机指令也即时提交执行；hook 双通道与无头模式保留）
+日期：2026-10-20
 关联文档：[需求文档](./requirements.md)
 
 ---
@@ -502,7 +502,7 @@ class ProjectChatManager {
 **架构：**
 
 1. **Hook 安装器 `dtmcp install-hooks`（用户级一次性）** — `cli/install-hooks.ts`：外科手术式合并 `~/.qoder/settings.json` 的 `hooks` 键（保留其他配置与用户已有 hooks；幂等：先按命令特征清除旧 dtmcp 条目再写）。为 `SessionStart / PostToolUse(matcher *) / UserPromptSubmit / Stop / SessionEnd` 注册 `dtmcp hook`（`dtmcp` 不在 PATH 时回退 `node <abs dist/cli/index.js> hook`）。覆盖前自动备份 `settings.json.bak`。**生效需重启电脑端 CLI。**
-2. **`dtmcp hook` 子命令** — `cli/hook.ts` 的 `runHook(input, rpc, env)`：读 stdin JSON → 经 daemon IPC（失败静默、绝不打断 CLI 会话）分发。环境变量 `DTMCP_HEADLESS=1`（无头 runner spawn 注入）→ 全部 no-op，防止无头会话被登记/镜像/认领（递归保护）。
+2. **`dtmcp hook` 子命令** — `cli/hook.ts` 的 `runHook(input, rpc, env)`：读 stdin JSON → 经 daemon IPC（失败静默、绝不打断 CLI 会话）分发。环境变量 `DTMCP_HEADLESS=1`（无头 runner spawn 注入）→ 全部 no-op，防止无头会话被登记/镜像/认领（递归保护）；`DTMCP_WRAPPED=1`（`dtmcp run` 包装器注入）→ 边界 hook 跳过 `hook_poll` 认领（包装器的注入循环独占消息，防止双重消费），但保留 ping 续活与 Stop 镜像。
    - `SessionStart` → `hook_ping`（登记活会话）。
    - `SessionEnd` → `hook_leave`（注销）。
    - `PostToolUse` / `UserPromptSubmit` → `hook_ping`（续活）+ `hook_poll`（认领该 cwd 对应项目的未读手机消息）→ 有则输出 `additionalContext`："手机钉钉发来新消息（视作用户补充指令），逐条处理并在最终回复说明结果（最终回复会自动转发到手机）：\n- …"。
@@ -513,14 +513,30 @@ class ProjectChatManager {
 **路径规范化（实测踩坑）：** macOS 上 `/tmp` 是 `/private/tmp` 的符号链接——`process.cwd()` 可能给出链接形式，而 qodercli hook 载荷里的 cwd 是真实路径。所有 workdir/cwd 比较（`getProjectByWorkdir`、`SessionRegistry.isActive`）都经 `platform/paths.resolveDir()`（`fs.realpathSync`，路径不存在时原样返回）两侧归一化，旧持久化数据无需迁移。
 
 **inbox 到达三分支（`server.ts` chat_message，无 pending question 时）：**
-1. 有 `workdir` 且 `sessionRegistry.isActive(workdir)` → 推手机"已收到，将在电脑端 Agent 下一个动作时处理。"（等 hook 认领注入），`delivered: 'session'`。
+1. 有 `workdir` 且 `sessionRegistry.isActive(workdir)` → 推手机"已收到，将在电脑端 Agent 下一个动作时处理。"（等 hook 或包装器认领注入；`dtmcp run` 下 ≤2s 即执行，见 §3.5.10.2），`delivered: 'session'`。
 2. 无活会话且 `headlessEnabled` 且 `agentRunner` → `enqueue` 无头处理（见下），`dispatched: 'agent'`。
 3. 无活会话且 headless 关（**默认**）→ 推手机"该项目的 qodercli 在电脑上未启动，消息已存收件箱。"，`delivered: 'queued'`。
 4. 无 `workdir` → 退化为占位回执（legacy ack）。
 
 **新增 RPC：** `hook_ping / hook_leave / hook_poll / hook_mirror`（含 cwd 的由 daemon 反查 projectId）。
 
-**注入时机限制：** 消息只在**工具边界**注入活会话；会话空闲等待输入时消息滞留收件箱，直到下一次工具调用/提交提示才被认领（提示语已说明）。
+**注入时机限制（已由 §3.5.10.2 解决）：** 纯 hook 模式下消息只在**工具边界**注入活会话；会话空闲等待输入时消息滞留收件箱，直到下一次工具调用/提交提示才被认领。要"开着即随时执行"需用 `dtmcp run` 包装器启动会话。
+
+### 3.5.10.2 `dtmcp run` PTY 包装器（v2.0：空闲活会话即时执行手机指令）
+
+**动机（用户需求）：** "只要这个项目的 CLI 开着，无论是否空闲，都应该可以接收指令并处理，和 CLI 终端上达到相同的效果"——且不要求电脑旁有人按键。工具边界注入（§3.5.10）在空闲等待输入时无法触发，故增加键盘级注入通路。
+
+**原理：** `dtmcp run [qodercli 参数…]`（`cli/run.ts`）用 node-pty 在伪终端里启动真实 qodercli，透明双向代理按键（stdin↔pty、含 resize 转发），并常驻一个注入循环 `InjectionLoop`：每 2s `hook_ping`（续活登记）+ `hook_poll`（认领本 cwd 项目的未读手机消息），把每条消息**以人类打字的等价形式**写入 TUI 输入行——括号粘贴 + 独立回车提交。单会话转录天然连续：回到电脑前按键即可接续手机发起的工作（同一会话、同一历史，无需额外同步）。
+
+**关键实现细节（全部实测踩坑所得）：**
+- **提交必须与粘贴分离**：`\x1b[200~…\x1b[201~` 与 `\r` 在同一次 stdin 写入中被 qodercli 视为粘贴内容的一部分而**不提交**；`InjectionLoop.tick` 先写粘贴块，等待 `enterDelayMs`（默认 300ms）后单独写 `'\r'`，实测 6s 完成"投递→执行→回复→Stop 镜像"全周期。
+- **长消息不走粘贴模式**：粘贴 >5 行或 >500 字符会被 TUI 折叠成 `[Pasted Text: N lines]` 占位符——`core/injector.ts` 的 `encodeTerminalInput()` 对超限消息直接逐字写入（字面模式）；消息先经 sanitize（保留 `\n\t`，剔除其余 C0/DEL 控制字符，防转义序列劫持输入解析）；`\r\n|\r` 归一化为 `\n`。
+- **热车保护**：TUI 启动期（约 10s，SessionStart hooks 运行中）输入框尚未就绪，认领注入会丢失。包装器等**子进程首次渲染 + 3s 稳定窗**后才启动认领循环（`runWrapped` 的 `warmupMs`）；`InjectionLoop.stop()` 幂等且后到的 start 不再执行。
+- **RPC 全容错**：`safeRequest` 吞掉一切失败（daemon 挂掉绝不能弄坏用户的终端会话），循环照常续跑。
+- **认领竞争**：包装器与同项目普通 CLI 会话的边界 hook 共用 `hook_poll`，先到先得；`DTMCP_WRAPPED=1` 使被包装会话自身的 hook 不重复认领（见 §3.5.10 第 2 条）。
+- **node-pty macOS 坑**：npm 解包丢失 `prebuilds/darwin-*/spawn-helper` 的可执行位 → `posix_spawnp` 失败；`package.json` 加 `postinstall: chmod +x …` 修复。
+
+**信任边界不变：** 手机钉钉群 = 电脑键盘（同 §3.5.10.1 的声明）；包装器不做审批，注入即执行。
 
 ### 3.5.10.1 无头 Agent 处理链路（可选模式，`agent.headless=true` 才启用）
 
@@ -550,13 +566,15 @@ class ProjectChatManager {
 src/
   core/
     project-chat-manager.ts  ← 项目会话管理（含收件箱、workdir 绑定、claimUnread、回声登记）
+    injector.ts              ← 终端注入编码内核（括号粘贴/字面分流、sanitize、CRLF 归一）
   daemon/
     chat-poller.ts           ← 3 秒轮询摄入（messageId 幂等、基线化、fromAgent 过滤）
     agent-runner.ts          ← 无头 Agent 处理链路（可选模式：串行队列、延迟 ack、超时、权限模式、DTMCP_HEADLESS）
     session-registry.ts      ← 活会话登记表（ping/leave/isActive、2h 过期自愈）
   cli/
-    hook.ts                  ← dtmcp hook：stdin JSON → IPC 分发（注入 additionalContext / Stop 镜像 / DTMCP_HEADLESS 短路）
+    hook.ts                  ← dtmcp hook：stdin JSON → IPC 分发（注入 additionalContext / Stop 镜像 / DTMCP_HEADLESS 短路 / DTMCP_WRAPPED 免认领）
     install-hooks.ts         ← settings.json hooks 键外科手术合并（幂等、备份、保留用户配置）
+    run.ts                   ← dtmcp run：node-pty 包装器 + InjectionLoop（2s 轮询认领、粘贴+分离回车、热车窗、RPC 容错）
 ```
 
 更新模块：
@@ -658,7 +676,7 @@ mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title，RPC
 请求：`{"id":1,"method":"ask","params":{...}}`
 响应：`{"id":1,"result":{...}}` 或 `{"id":1,"error":{"code":"...","message":"..."}}`
 
-方法集合与 MCP 工具对应（`ask` / `check` / `cancel` / `status` / `list_projects` / `read_project_messages` / `list_project_inboxes` / `reply_to_project` / `reply` / `set_switch`），外加内部方法：`hello`（版本握手，客户端据此判断能否 `{"method":"spawn"}` 自行拉起 daemon）、`ingest`（transport 把入站消息喂进 core）、`chat_message`（轮询回流，路由答案、写入收件箱并按三分支处理，见 §3.5.8、§3.5.10）、`hook_ping` / `hook_leave` / `hook_poll` / `hook_mirror`（`dtmcp hook` 子命令使用：活会话登记/注销、认领未读手机消息注入活会话、Stop 最终回复镜像回手机）。
+方法集合与 MCP 工具对应（`ask` / `check` / `cancel` / `status` / `list_projects` / `read_project_messages` / `list_project_inboxes` / `reply_to_project` / `reply` / `set_switch`），外加内部方法：`hello`（版本握手，客户端据此判断能否 `{"method":"spawn"}` 自行拉起 daemon）、`ingest`（transport 把入站消息喂进 core）、`chat_message`（轮询回流，路由答案、写入收件箱并按三分支处理，见 §3.5.8、§3.5.10）、`hook_ping` / `hook_leave` / `hook_poll` / `hook_mirror`（`dtmcp hook` 子命令使用：活会话登记/注销、认领未读手机消息注入活会话、Stop 最终回复镜像回手机；`dtmcp run` 的 InjectionLoop 同样复用 `hook_ping/hook_poll/hook_leave`，不新增方法）。
 
 这是有意的分层——MCP 面只暴露 agent 需要的动作，其余（`hello`/`spawn`/`ingest`/`chat_message`/`set_switch`）留在本机或由 daemon 内部调用。
 
@@ -673,6 +691,9 @@ dtmcp reply <id> <文本>           # 电脑端作答（G3）
 dtmcp pending                    # 列待答
 dtmcp start | stop | logs        # daemon 生命周期
 dtmcp smoke                      # 真机冒烟：登录 → 目标 → 发一条 → 等回复
+dtmcp install-hooks              # 一次性注册 dtmcp hooks 到 ~/.qoder/settings.json
+dtmcp hook                       # qodercli hook 子进程入口（内部使用）
+dtmcp run [qodercli 参数…]        # PTY 包装启动 qodercli：手机指令空闲也即时提交执行（§3.5.10.2）
 ```
 
 `dtmcp doctor` 的输出格式要求是**机器可读优先**（`--format json`），人类可读视图由它渲染。理由：同事排错时最常见动作是把这段输出贴给你，一份纯文本描述无法被自动比对，而 JSON 可以直接进 issue。
@@ -989,3 +1010,4 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
 | v1.7 | 2026-10-19 | 摄入架构替换：dws 事件总线发生假死事故（自报 connected 但 received 恒 0，重启无效），整条改为 `ChatPoller` 3 秒轮询 + messageId 幂等 + 重启基线化（§3.5.6）。新增无头 Agent 处理链路 `AgentRunner`（§3.5.10）：手机主动消息由 `qodercli -p --strict-mcp-config` 按 CLI 同等语义处理，只回推最终结果；15s 延迟 ack、15min 超时、结果截断；权限模式可配置（默认 full，`read-only`/`accept-edits` 可选）。workdir 绑定：ask RPC 附带 `cwd`，随 `project-chats.json` 持久化 |
 | v1.8 | 2026-10-19 | 架构评审 + 实测驱动转向：无头运行零记忆（手机发 "continue" 得到"没有可续的任务"），根因是上下文挂在会话而非项目。实测验证 qodercli hooks（与 Claude Code 同构）的 `additionalContext` 能进入模型上下文、`Stop` 事件带 `last_assistant_message`，`remote-control`/`--teleport` 为云中介无本地注入路径（否决）。会话树状 JSONL 并发写入会孤儿化分支（否决 "-r 写入 PC 活动文件" 方案） |
 | v1.9 | 2026-10-20 | 手机 ↔ 电脑活会话双通道（Hook 架构，§3.5.10 重写）：手机钉钉作为同一 Agent 会话的第二 I/O 通道。`dtmcp install-hooks` 外科手术合并 `~/.qoder/settings.json` hooks（幂等、备份、保留用户配置）；`dtmcp hook` 子命令经 IPC 分发——`SessionStart/PostToolUse/UserPromptSubmit` 认领未读手机消息并注入 `additionalContext`，`Stop` 镜像最终回复回手机，`SessionEnd` 注销。`session-registry.ts` 活会话登记（2h 过期自愈）；`claimUnread` 先到先得。inbox 到达改三分支路由：有活会话→提示下一步处理；无会话且 `agent.headless=true`→无头代班；默认关→"qodercli 在电脑上未启动"。无头 runner spawn 注入 `DTMCP_HEADLESS=1` 使 hooks no-op（递归保护）。`agent.headless` 解析：env > config.json > false |
+| v2.0 | 2026-10-20 | 需求升级："项目 CLI 开着即可接收并执行手机指令（无论空闲）"。新增 `dtmcp run` PTY 包装器（§3.5.10.2）：node-pty 内启动 qodercli，透明代理按键；`InjectionLoop` 每 2s `hook_ping`+`hook_poll` 认领未读消息，以括号粘贴 + **分离的 300ms 延迟回车**写入 TUI（同块回车不提交——实测踩坑），空闲即时执行完整 CoT，回复经 Stop hook 镜像回群，回到电脑同会话无缝接续。`core/injector.ts` 编码内核（>5 行或 >500 字符改字面输入防 `[Pasted Text]` 折叠、控制字符 sanitize、CRLF 归一）。热车保护：首次渲染 + 3s 稳定窗后才开始认领；RPC 全容错护住用户终端。`DTMCP_WRAPPED=1` 使被包装会话边界 hook 免认领防双重消费。单实例锁带 PID 文件与死进程回收。node-pty macOS `spawn-helper` 丢可执行位 → `postinstall chmod +x` 修复 |

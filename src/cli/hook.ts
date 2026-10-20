@@ -33,6 +33,9 @@ export async function runHook(
         session_id: input.session_id,
         cwd: input.cwd,
       });
+      if (env.DTMCP_WRAPPED) {
+        return '';
+      }
       const poll = await rpc.request('hook_poll', { cwd: input.cwd });
       const messages = poll?.messages ?? [];
       if (messages.length === 0) {

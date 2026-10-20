@@ -22,6 +22,32 @@ describe('cli/hook runHook', () => {
     expect(rpc.request).not.toHaveBeenCalled();
   });
 
+  it('under a dtmcp-run wrapper, boundary hooks keep alive but never claim (no double injection)', async () => {
+    const rpc = makeRpc();
+    const out = await runHook(base, rpc, { DTMCP_WRAPPED: '1' });
+
+    expect(out).toBe('');
+    expect(rpc.request).toHaveBeenCalledWith('hook_ping', {
+      session_id: 's1',
+      cwd: '/repo/p1',
+    });
+    expect(rpc.request).not.toHaveBeenCalledWith('hook_poll', expect.anything());
+  });
+
+  it('under a dtmcp-run wrapper, Stop still mirrors the final reply to the phone', async () => {
+    const rpc = makeRpc();
+    await runHook(
+      { ...base, hook_event_name: 'Stop', last_assistant_message: '已完成' },
+      rpc,
+      { DTMCP_WRAPPED: '1' }
+    );
+
+    expect(rpc.request).toHaveBeenCalledWith('hook_mirror', {
+      cwd: '/repo/p1',
+      content: '已完成',
+    });
+  });
+
   it('SessionStart pings the daemon', async () => {
     const rpc = makeRpc();
     await runHook({ ...base, hook_event_name: 'SessionStart' }, rpc, {});
