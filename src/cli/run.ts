@@ -105,6 +105,16 @@ export interface WrapDeps {
   warmupMs?: number;
 }
 
+export function resolveLaunch(
+  argv: string[],
+  defaultCommand: string
+): { command: string; args: string[] } {
+  if (argv.length > 0 && !argv[0].startsWith('-')) {
+    return { command: argv[0], args: argv.slice(1) };
+  }
+  return { command: defaultCommand, args: [...argv] };
+}
+
 // Runs `command` inside a PTY, transparently proxying the real terminal,
 // while injecting any pending phone messages as if a human had typed them.
 // Resolves with the child's exit code.
@@ -155,9 +165,10 @@ export function runWrapped(deps: WrapDeps, command: string, args: string[]): Pro
   });
 }
 
-export async function runCommand(qodercliArgs: string[]): Promise<void> {
+export async function runCommand(argv: string[]): Promise<void> {
   const pty = await import('node-pty');
   const endpoint = ipc.endpoint(identity.instanceId());
+  const { command, args } = resolveLaunch(argv, 'qodercli');
 
   const tty: Tty = {
     setRawMode: (m) => {
@@ -190,8 +201,8 @@ export async function runCommand(qodercliArgs: string[]): Promise<void> {
       endpoint,
       env: process.env,
     },
-    'qodercli',
-    qodercliArgs
+    command,
+    args
   );
 
   process.exit(exitCode);

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   InjectionLoop,
   runWrapped,
+  resolveLaunch,
   type PtyChild,
   type RpcLike,
   type Tty,
@@ -197,6 +198,40 @@ function makeTty() {
     },
   };
 }
+
+describe('cli/run resolveLaunch', () => {
+  it('defaults to qodercli when no args', () => {
+    expect(resolveLaunch([], 'qodercli')).toEqual({
+      command: 'qodercli',
+      args: [],
+    });
+  });
+
+  it('passes flags through to the default command', () => {
+    expect(resolveLaunch(['--resume', 'abc'], 'qodercli')).toEqual({
+      command: 'qodercli',
+      args: ['--resume', 'abc'],
+    });
+  });
+
+  it('treats a leading non-flag token as the command to wrap', () => {
+    expect(resolveLaunch(['kimi'], 'qodercli')).toEqual({
+      command: 'kimi',
+      args: [],
+    });
+    expect(resolveLaunch(['kimi', '--foo', 'bar'], 'qodercli')).toEqual({
+      command: 'kimi',
+      args: ['--foo', 'bar'],
+    });
+  });
+
+  it('stops scanning for the command at the first flag', () => {
+    expect(resolveLaunch(['claude', '-p', 'hi'], 'qodercli')).toEqual({
+      command: 'claude',
+      args: ['-p', 'hi'],
+    });
+  });
+});
 
 describe('cli/run runWrapped', () => {
   it('does not claim messages until the child TUI has rendered and warmup elapsed', async () => {

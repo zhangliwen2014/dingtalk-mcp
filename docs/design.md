@@ -526,7 +526,9 @@ class ProjectChatManager {
 
 **动机（用户需求）：** "只要这个项目的 CLI 开着，无论是否空闲，都应该可以接收指令并处理，和 CLI 终端上达到相同的效果"——且不要求电脑旁有人按键。工具边界注入（§3.5.10）在空闲等待输入时无法触发，故增加键盘级注入通路。
 
-**原理：** `dtmcp run [qodercli 参数…]`（`cli/run.ts`）用 node-pty 在伪终端里启动真实 qodercli，透明双向代理按键（stdin↔pty、含 resize 转发），并常驻一个注入循环 `InjectionLoop`：每 2s `hook_ping`（续活登记）+ `hook_poll`（认领本 cwd 项目的未读手机消息），把每条消息**以人类打字的等价形式**写入 TUI 输入行——括号粘贴 + 独立回车提交。单会话转录天然连续：回到电脑前按键即可接续手机发起的工作（同一会话、同一历史，无需额外同步）。
+**原理：** `dtmcp run [参数…]`（`cli/run.ts`）默认在伪终端里启动真实 qodercli；**第一个参数不是选项时即视为要包装的目标 CLI**（`dtmcp run kimi`、`dtmcp run claude`——`resolveLaunch`，注入协议对任何支持括号粘贴的 TUI 通用，与具体 agent 无关），透明双向代理按键（stdin↔pty、含 resize 转发），并常驻一个注入循环 `InjectionLoop`：每 2s `hook_ping`（续活登记）+ `hook_poll`（认领本 cwd 项目的未读手机消息），把每条消息**以人类打字的等价形式**写入 TUI 输入行——括号粘贴 + 独立回车提交。单会话转录天然连续：回到电脑前按键即可接续手机发起的工作（同一会话、同一历史，无需额外同步）。
+
+**与 MCP 的层次关系（澄清"包装器是不是把 MCP 放外面了"）：** MCP 面始终在 agent 内部——`dtmcp mcp`（stdio server）注册进各 agent 的 mcp 配置，`ask_on_dingtalk / check_answer / read_project_messages / reply_to_project` 等全部由模型自己调用，这部分从未外置。外置的只有**唤醒/输入通路**：MCP 是 client 发起的请求-响应协议，server 无法向空闲等待输入的 agent 推送一轮对话，这是协议限制、不是设计偏好。手机→PC 的主动指令必须走 agent 外部机制：v1.9 工具边界 hook（依赖该 CLI 支持 hooks）或 v2.0 PTY 包装器（对任何 TUI 通用，等价于"远程键盘"）。两者都不是 MCP，也不该是。目标 CLI 若支持镜像类 hook（qodercli/Claude Code：`dtmcp install-hooks` 写其 settings）则回复自动回手机；不支持的 CLI 结果留电脑端转录，回电脑可接续查看。
 
 **关键实现细节（全部实测踩坑所得）：**
 - **提交必须与粘贴分离**：`\x1b[200~…\x1b[201~` 与 `\r` 在同一次 stdin 写入中被 qodercli 视为粘贴内容的一部分而**不提交**；`InjectionLoop.tick` 先写粘贴块，等待 `enterDelayMs`（默认 300ms）后单独写 `'\r'`，实测 6s 完成"投递→执行→回复→Stop 镜像"全周期。

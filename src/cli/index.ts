@@ -110,7 +110,8 @@ Commands:
   mcp         Start the MCP server (for agent integration)
   hook           Run as a qodercli hook (internal)
   install-hooks  Register dtmcp hooks into ~/.qoder/settings.json
-  run            Launch qodercli inside a PTY with phone-message injection
+  run            Wrap any agent TUI (default: qodercli) with phone-message injection
+                 e.g. dtmcp run [qodercli args] | dtmcp run kimi | dtmcp run claude
 `);
   }
 }
