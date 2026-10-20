@@ -26,6 +26,7 @@ export class InjectionLoop {
   private enterDelayMs: number;
   private timer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private ticking = false;
 
   constructor(options: InjectionLoopOptions) {
     this.rpc = options.rpc;
@@ -56,16 +57,47 @@ export class InjectionLoop {
   }
 
   private async tick(): Promise<void> {
-    await this.safeRequest('hook_ping', { session_id: this.sessionId, cwd: this.cwd });
-    const res = await this.safeRequest('hook_poll', { cwd: this.cwd });
-    const messages = (res?.messages ?? []) as Array<{ content: string }>;
-    for (const msg of messages) {
-      const payload = encodeTerminalInput(msg.content);
-      // The Enter must arrive as its own stdin event; coalesced into the paste
-      // chunk the TUI treats it as part of the paste and never submits.
-      this.write(payload.slice(0, -1));
-      await new Promise((r) => setTimeout(r, this.enterDelayMs));
-      this.write('\r');
+    if (this.ticking || this.stopped) return;
+    this.ticking = true;
+    try {
+      await this.safeRequest('hook_ping', { session_id: this.sessionId, cwd: this.cwd });
+      const res = await this.safeRequest('hook_poll', { cwd: this.cwd });
+      if (this.stopped) return;
+      const messages = (res?.messages ?? []) as Array<{
+        id: number;
+        content: string;
+      }>;
+
+      const delivered: number[] = [];
+      let failedFrom = -1;
+      for (let i = 0; i < messages.length; i++) {
+        if (this.stopped) return;
+        const msg = messages[i];
+        const payload = encodeTerminalInput(msg.content);
+        try {
+          // The Enter must arrive as its own stdin event; coalesced into the paste
+          // chunk the TUI treats it as part of the paste and never submits.
+          this.write(payload.slice(0, -1));
+          await new Promise((r) => setTimeout(r, this.enterDelayMs));
+          if (this.stopped) return;
+          this.write('\r');
+          delivered.push(msg.id);
+        } catch {
+          // pty died mid-batch: this message and the rest go back to the pool.
+          failedFrom = i;
+          break;
+        }
+      }
+
+      if (delivered.length > 0) {
+        await this.safeRequest('hook_ack', { cwd: this.cwd, ids: delivered });
+      }
+      if (failedFrom >= 0) {
+        const rest = messages.slice(failedFrom).map((m) => m.id);
+        await this.safeRequest('hook_unclaim', { cwd: this.cwd, ids: rest });
+      }
+    } finally {
+      this.ticking = false;
     }
   }
 
@@ -101,6 +133,7 @@ export interface WrapDeps {
   tty: Tty;
   endpoint: string;
   env: NodeJS.ProcessEnv;
+  onSignal?: (signal: string, cb: () => void) => void;
   pollIntervalMs?: number;
   warmupMs?: number;
 }
@@ -131,8 +164,18 @@ export function runWrapped(deps: WrapDeps, command: string, args: string[]): Pro
   });
 
   const rpc = deps.connectRpc(deps.endpoint);
+  // node-pty throws EIO once the child is gone; a dead pty must never crash the wrapper.
+  const safeWrite = (d: string) => {
+    try {
+      child.write(d);
+    } catch {
+      /* child already exited */
+    }
+  };
   const loop = new InjectionLoop({
     rpc,
+    // Raw write here: a throwing write lets the loop unclaim its lease instead
+    // of acking keystrokes the dead pty never received.
     write: (d) => child.write(d),
     sessionId,
     cwd,
@@ -149,12 +192,22 @@ export function runWrapped(deps: WrapDeps, command: string, args: string[]): Pro
   };
 
   deps.tty.setRawMode(true);
-  deps.tty.onStdinData((d) => child.write(d));
+  deps.tty.onStdinData(safeWrite);
   child.onData((d) => {
     scheduleLoop();
     deps.tty.write(d);
   });
   deps.tty.onResize(() => child.resize(deps.tty.columns, deps.tty.rows));
+
+  // Losing the terminal (or being killed) must still restore the parent tty
+  // and take the inner CLI down with us, otherwise it is orphaned forever.
+  const onSignal = () => {
+    loop.stop();
+    deps.tty.setRawMode(false);
+    child.kill();
+  };
+  deps.onSignal?.('SIGTERM', onSignal);
+  deps.onSignal?.('SIGHUP', onSignal);
 
   return new Promise<number>((resolve) => {
     child.onExit(({ exitCode }) => {
@@ -200,6 +253,7 @@ export async function runCommand(argv: string[]): Promise<void> {
       tty,
       endpoint,
       env: process.env,
+      onSignal: (sig, cb) => process.on(sig, cb),
     },
     command,
     args

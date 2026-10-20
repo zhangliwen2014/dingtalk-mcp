@@ -78,14 +78,21 @@ export class Registry {
       })),
     };
 
-    fs.writeFileSync(this.filePath, JSON.stringify(state, null, 2), {
-      mode: 0o600,
-    });
+    // Write-then-rename: a crash mid-save can never leave a truncated state file.
+    const tmp = `${this.filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, this.filePath);
   }
 
   load(): void {
+    let data: string;
     try {
-      const data = fs.readFileSync(this.filePath, 'utf8');
+      data = fs.readFileSync(this.filePath, 'utf8');
+    } catch {
+      return; // No state file yet: start fresh.
+    }
+
+    try {
       const state: PersistedState = JSON.parse(data);
       this.nextId = state.nextId;
       this.questions.clear();
@@ -110,7 +117,18 @@ export class Registry {
         this.questions.set(pq.id, q);
       }
     } catch {
-      // File doesn't exist or is invalid, start fresh
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const dest = `${this.filePath}.corrupt-${stamp}`;
+      try {
+        fs.renameSync(this.filePath, dest);
+      } catch {
+        /* best effort */
+      }
+      console.warn(
+        `state.json was unreadable and could not be parsed; preserved at ${dest}, starting fresh.`
+      );
+      this.questions.clear();
+      this.nextId = 1;
     }
   }
 }

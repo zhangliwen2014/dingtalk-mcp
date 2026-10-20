@@ -1,6 +1,6 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v2.0（新增 `dtmcp run` PTY 包装器：活会话空闲时手机指令也即时提交执行；hook 双通道与无头模式保留）
+版本：v2.1（架构评审修复：RPC 关联 id 语义、两阶段投递 claim/ack/lease、senderId 白名单、原子持久化 + 损坏保全、回声模糊匹配、包装器信号/重入保护、daemon 优雅停机）
 日期：2026-10-20
 关联文档：[需求文档](./requirements.md)
 
@@ -518,7 +518,11 @@ class ProjectChatManager {
 3. 无活会话且 headless 关（**默认**）→ 推手机"该项目的 qodercli 在电脑上未启动，消息已存收件箱。"，`delivered: 'queued'`。
 4. 无 `workdir` → 退化为占位回执（legacy ack）。
 
-**新增 RPC：** `hook_ping / hook_leave / hook_poll / hook_mirror`（含 cwd 的由 daemon 反查 projectId）。
+**新增 RPC：** `hook_ping / hook_leave / hook_poll / hook_ack / hook_unclaim / hook_mirror`（含 cwd 的由 daemon 反查 projectId）。
+
+**两阶段投递（v2.1）：** `hook_poll` 认领只做**租约**（`claimedAt` 标记，60s 有效），不再直接置已读；消费者注入成功后 `hook_ack {cwd, ids}` 才落 `read`，注入失败（pty 写抛错）立即 `hook_unclaim {cwd, ids}` 归还池中；进程崩溃不 ack 则 60s 后自动可被其他消费者重认领。手机消息由此获得**至少一次**投递保证（重复仅发生在消费者崩溃且未写成的场景）。`dtmcp hook` 边界 hook 在产出 `additionalContext` 后 ack（ack 失败不阻塞输出，靠租约过期兜底）；`dtmcp run` 的 InjectionLoop 逐条注入、批尾 ack 成功项、写异常时 unclaim 剩余项。
+
+**发送者白名单（v2.1，P0 安全）：** 群消息等价于 PC 键盘输入，`config.json` 新增 `security.allowedSenderIds: [senderId…]`。配置后：不在名单（或缺 senderId）的群消息在 `handleChatMessage` 入口直接 `ignored: 'unauthorized'`——不入收件箱、不路由答案、不回执。未配置：维持放行并在 daemon 启动日志打一次醒目告警（owner 的 senderId 即白名单唯一条目；自己的回声靠 §3.5.9 模糊匹配过滤，不受白名单影响）。
 
 **注入时机限制（已由 §3.5.10.2 解决）：** 纯 hook 模式下消息只在**工具边界**注入活会话；会话空闲等待输入时消息滞留收件箱，直到下一次工具调用/提交提示才被认领。要"开着即随时执行"需用 `dtmcp run` 包装器启动会话。
 
@@ -678,7 +682,7 @@ mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title，RPC
 请求：`{"id":1,"method":"ask","params":{...}}`
 响应：`{"id":1,"result":{...}}` 或 `{"id":1,"error":{"code":"...","message":"..."}}`
 
-方法集合与 MCP 工具对应（`ask` / `check` / `cancel` / `status` / `list_projects` / `read_project_messages` / `list_project_inboxes` / `reply_to_project` / `reply` / `set_switch`），外加内部方法：`hello`（版本握手，客户端据此判断能否 `{"method":"spawn"}` 自行拉起 daemon）、`ingest`（transport 把入站消息喂进 core）、`chat_message`（轮询回流，路由答案、写入收件箱并按三分支处理，见 §3.5.8、§3.5.10）、`hook_ping` / `hook_leave` / `hook_poll` / `hook_mirror`（`dtmcp hook` 子命令使用：活会话登记/注销、认领未读手机消息注入活会话、Stop 最终回复镜像回手机；`dtmcp run` 的 InjectionLoop 同样复用 `hook_ping/hook_poll/hook_leave`，不新增方法）。
+方法集合与 MCP 工具对应（`ask` / `check` / `cancel` / `status` / `list_projects` / `read_project_messages` / `list_project_inboxes` / `reply_to_project` / `reply` / `set_switch`），外加内部方法：`hello`（版本握手，客户端据此判断能否 `{"method":"spawn"}` 自行拉起 daemon）、`ingest`（transport 把入站消息喂进 core）、`chat_message`（轮询回流，路由答案、写入收件箱并按三分支处理，见 §3.5.8、§3.5.10）、`hook_ping` / `hook_leave` / `hook_poll` / `hook_ack` / `hook_unclaim` / `hook_mirror`（`dtmcp hook` 子命令使用：活会话登记/注销、认领/确认/归还未读手机消息、Stop 最终回复镜像回手机；`dtmcp run` 的 InjectionLoop 同样复用这些方法，不另新增）。**响应封装（v2.1）：** socket 层响应一律 `{ ...result, id: request.id }`——`id` 永远是 JSON-RPC 关联 id，业务 id 以 `questionId` 等具名字段返回（此前业务 `id` 会覆盖关联 id 导致客户端挂死，属 P0 修复）。
 
 这是有意的分层——MCP 面只暴露 agent 需要的动作，其余（`hello`/`spawn`/`ingest`/`chat_message`/`set_switch`）留在本机或由 daemon 内部调用。
 
@@ -1013,3 +1017,4 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
 | v1.8 | 2026-10-19 | 架构评审 + 实测驱动转向：无头运行零记忆（手机发 "continue" 得到"没有可续的任务"），根因是上下文挂在会话而非项目。实测验证 qodercli hooks（与 Claude Code 同构）的 `additionalContext` 能进入模型上下文、`Stop` 事件带 `last_assistant_message`，`remote-control`/`--teleport` 为云中介无本地注入路径（否决）。会话树状 JSONL 并发写入会孤儿化分支（否决 "-r 写入 PC 活动文件" 方案） |
 | v1.9 | 2026-10-20 | 手机 ↔ 电脑活会话双通道（Hook 架构，§3.5.10 重写）：手机钉钉作为同一 Agent 会话的第二 I/O 通道。`dtmcp install-hooks` 外科手术合并 `~/.qoder/settings.json` hooks（幂等、备份、保留用户配置）；`dtmcp hook` 子命令经 IPC 分发——`SessionStart/PostToolUse/UserPromptSubmit` 认领未读手机消息并注入 `additionalContext`，`Stop` 镜像最终回复回手机，`SessionEnd` 注销。`session-registry.ts` 活会话登记（2h 过期自愈）；`claimUnread` 先到先得。inbox 到达改三分支路由：有活会话→提示下一步处理；无会话且 `agent.headless=true`→无头代班；默认关→"qodercli 在电脑上未启动"。无头 runner spawn 注入 `DTMCP_HEADLESS=1` 使 hooks no-op（递归保护）。`agent.headless` 解析：env > config.json > false |
 | v2.0 | 2026-10-20 | 需求升级："项目 CLI 开着即可接收并执行手机指令（无论空闲）"。新增 `dtmcp run` PTY 包装器（§3.5.10.2）：node-pty 内启动 qodercli，透明代理按键；`InjectionLoop` 每 2s `hook_ping`+`hook_poll` 认领未读消息，以括号粘贴 + **分离的 300ms 延迟回车**写入 TUI（同块回车不提交——实测踩坑），空闲即时执行完整 CoT，回复经 Stop hook 镜像回群，回到电脑同会话无缝接续。`core/injector.ts` 编码内核（>5 行或 >500 字符改字面输入防 `[Pasted Text]` 折叠、控制字符 sanitize、CRLF 归一）。热车保护：首次渲染 + 3s 稳定窗后才开始认领；RPC 全容错护住用户终端。`DTMCP_WRAPPED=1` 使被包装会话边界 hook 免认领防双重消费。单实例锁带 PID 文件与死进程回收。node-pty macOS `spawn-helper` 丢可执行位 → `postinstall chmod +x` 修复 |
+| v2.1 | 2026-10-20 | 双评审（架构师+资深开发）修复批次，全量 TDD：**P0** socket 响应封装改 `{...result, id: request.id}`，业务 id 更名 `questionId`（此前 `ask` 等业务返回的顶层 `id` 覆盖 JSON-RPC 关联 id → 客户端永久挂死）；`security.allowedSenderIds` 发送者白名单（未配置=放行+启动告警，命中外发送者整条忽略不回执）。**P1** `hook_poll` 两阶段投递：认领=60s 租约，注入成功 `hook_ack` 落读、pty 写异常 `hook_unclaim` 立即归还、崩溃靠过期自动重投（至少一次语义，`claimUnread` 不再认领即置读）；InjectionLoop tick 重入保护 + stop 后丢弃已认领消息；`dtmcp run` 注册 SIGTERM/SIGHUP（还原 raw mode、击杀子进程防孤儿），loop 写改为透传异常以驱动 unclaim，stdin 代理维持 EIO 容错；回声过滤去空白规范化 + ≥20 字包含判定（钉钉重排/截断回声不再当用户消息）；`project-chats.json`/`state.json` 原子写（tmp+rename）且解析失败**保全**原件为 `*.corrupt-<ts>` 并告警（不再静默清空）；daemon `stop()` 主动销毁在册 IPC 连接（长连接曾使 `server.close()` 永不回调、SIGTERM 挂死需 kill -9）。测试 233 全绿 |

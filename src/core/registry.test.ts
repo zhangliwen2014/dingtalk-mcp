@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -84,6 +84,49 @@ describe('core/registry', () => {
       registry2.load();
       const nextId = registry2.allocateId();
       expect(nextId).toBe(3);
+    });
+
+    it('a poisoned temp path makes save fail without damaging the state file', () => {
+      const registry = new Registry();
+      registry.save();
+
+      const file = path.join(tempDir, 'state.json');
+      const before = fs.readFileSync(file, 'utf8');
+
+      // A tmp+rename writer hits EISDIR here and the real file survives;
+      // a direct writer would silently overwrite the state.
+      fs.mkdirSync(file + '.tmp');
+      const id = registry.allocateId();
+      registry.add({ id, text: 'new', target: 'user1' });
+      expect(() => registry.save()).toThrow();
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    });
+
+    it('save leaves no temp files behind', () => {
+      const registry = new Registry();
+      registry.save();
+      expect(
+        fs.readdirSync(tempDir).filter((f) => f.includes('.tmp'))
+      ).toHaveLength(0);
+    });
+
+    it('preserves a corrupt state file instead of silently starting fresh', () => {
+      const file = path.join(tempDir, 'state.json');
+      fs.writeFileSync(file, '{oops');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      new Registry().load();
+
+      const preserved = fs
+        .readdirSync(tempDir)
+        .filter((f) => f.startsWith('state.json.corrupt'));
+      expect(preserved).toHaveLength(1);
+      expect(fs.readFileSync(path.join(tempDir, preserved[0]), 'utf8')).toBe(
+        '{oops'
+      );
+      expect(fs.existsSync(file)).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
     });
   });
 });

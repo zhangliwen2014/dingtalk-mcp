@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DaemonServer } from './server.js';
+import { IpcClient } from './client.js';
 import { FakeTransport } from '../transport/fake-transport.js';
 import { Switch } from '../core/switch.js';
 import { Registry } from '../core/registry.js';
@@ -8,6 +9,7 @@ import { ProjectChatManager } from '../core/project-chat-manager.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as net from 'net';
 
 describe('DaemonServer', () => {
   let tempDir: string;
@@ -46,6 +48,63 @@ describe('DaemonServer', () => {
     });
   });
 
+  describe('shutdown', () => {
+    it('stop() terminates active connections instead of hanging on them', async () => {
+      const sock = net.connect(path.join(tempDir, 'test.sock'));
+      await new Promise((res) => sock.once('connect', res));
+
+      const outcome = await Promise.race([
+        server.stop().then(() => 'stopped'),
+        new Promise((res) => setTimeout(() => res('timeout'), 1000)),
+      ]);
+      expect(outcome).toBe('stopped');
+
+      const closed = await Promise.race([
+        new Promise((res) => sock.once('close', () => res('closed'))),
+        new Promise((res) => setTimeout(() => res('open'), 500)),
+      ]);
+      expect(closed).toBe('closed');
+      sock.destroy();
+    });
+  });
+
+  describe('socket correlation id', () => {
+    function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+      return Promise.race([
+        p,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('RPC timed out')), ms)
+        ),
+      ]);
+    }
+
+    it('resolves a socket request whose handler returns a business id', async () => {
+      await switchControl.set(true);
+      transport.setResolveTargetResult('user123');
+
+      const client = new IpcClient(path.join(tempDir, 'test.sock'));
+      await client.connect();
+      try {
+        // Consume requestId 1 so the ask request carries correlation id 2,
+        // distinct from the business question id 1.
+        await client.request('hello', { version: '1.0.0' });
+
+        const result = await withTimeout(
+          client.request('ask', { question: 'Q?', target: 'self' }),
+          2000
+        );
+        expect(result).toMatchObject({
+          ok: true,
+          status: 'pending',
+          id: 2,
+          questionId: 1,
+        });
+      } finally {
+        await client.disconnect();
+      }
+    });
+  });
+
   describe('ask (disabled)', () => {
     it('returns blocked when switch is off', async () => {
       await switchControl.set(false);
@@ -79,7 +138,7 @@ describe('DaemonServer', () => {
       expect(result).toMatchObject({
         ok: true,
         status: 'pending',
-        id: 1,
+        questionId: 1,
       });
 
       expect(transport.sentMessages).toHaveLength(1);
@@ -93,8 +152,8 @@ describe('DaemonServer', () => {
       const r1 = await server.rpc('ask', { question: 'Q1?', target: 'self' });
       const r2 = await server.rpc('ask', { question: 'Q2?', target: 'self' });
 
-      expect(r1.id).toBe(1);
-      expect(r2.id).toBe(2);
+      expect(r1.questionId).toBe(1);
+      expect(r2.questionId).toBe(2);
       expect(transport.sentMessages).toHaveLength(2);
     });
   });
@@ -110,7 +169,7 @@ describe('DaemonServer', () => {
         question: 'Test?',
         target: 'self',
       });
-      const id = askResult.id;
+      const id = askResult.questionId;
 
       await server.rpc('reply', { text: `#Q${id}: 答案` });
 
@@ -129,7 +188,7 @@ describe('DaemonServer', () => {
         target: 'self',
       });
 
-      const checkResult = await server.rpc('check', { id: askResult.id });
+      const checkResult = await server.rpc('check', { id: askResult.questionId });
       expect(checkResult).toMatchObject({
         ok: true,
         status: 'pending',
@@ -149,13 +208,13 @@ describe('DaemonServer', () => {
         target: 'self',
       });
 
-      const cancelResult = await server.rpc('cancel', { id: askResult.id });
+      const cancelResult = await server.rpc('cancel', { id: askResult.questionId });
       expect(cancelResult).toMatchObject({
         ok: true,
         status: 'cancelled',
       });
 
-      const checkResult = await server.rpc('check', { id: askResult.id });
+      const checkResult = await server.rpc('check', { id: askResult.questionId });
       expect(checkResult.status).toBe('cancelled');
     });
   });
@@ -197,9 +256,9 @@ describe('DaemonServer', () => {
       await server.rpc('ask', { question: 'Q1?', target: 'self' });
       const r2 = await server.rpc('ask', { question: 'Q2?', target: 'self' });
 
-      await server.rpc('ingest', { text: `#Q${r2.id}: 选Q2` });
+      await server.rpc('ingest', { text: `#Q${r2.questionId}: 选Q2` });
 
-      const check = await server.rpc('check', { id: r2.id });
+      const check = await server.rpc('check', { id: r2.questionId });
       expect(check).toMatchObject({
         ok: true,
         status: 'answered',
@@ -242,9 +301,9 @@ describe('DaemonServer', () => {
         target: 'self',
       });
 
-      await server.rpc('ingest', { text: `#忽略${askResult.id}` });
+      await server.rpc('ingest', { text: `#忽略${askResult.questionId}` });
 
-      const check = await server.rpc('check', { id: askResult.id });
+      const check = await server.rpc('check', { id: askResult.questionId });
       expect(check.status).toBe('cancelled');
     });
   });
@@ -295,7 +354,7 @@ describe('DaemonServer', () => {
       expect(result).toMatchObject({
         ok: true,
         status: 'pending',
-        id: 1,
+        questionId: 1,
         chatId: 'chat-abc',
       });
 
@@ -403,7 +462,7 @@ describe('DaemonServer', () => {
         content: '答案',
       });
 
-      expect(result).toMatchObject({ ok: true, id: 1 });
+      expect(result).toMatchObject({ ok: true, questionId: 1 });
 
       const check = await projectServer.rpc('check', { id: 1 });
       expect(check).toMatchObject({
@@ -813,6 +872,158 @@ describe('DaemonServer', () => {
       const result = await hookServer.rpc('hook_mirror', { cwd: '/nowhere', content: 'y' });
 
       expect(result).toMatchObject({ ok: true, mirrored: false });
+    });
+
+    it('hook_ack marks claimed messages delivered', async () => {
+      vi.spyOn(projectChatManager, 'getProjectByWorkdir').mockReturnValue(chat);
+      const ack = vi
+        .spyOn(projectChatManager, 'acknowledge')
+        .mockImplementation(() => {});
+
+      const result = await hookServer.rpc('hook_ack', {
+        cwd: '/repo/p1',
+        ids: [1, 2],
+      });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(ack).toHaveBeenCalledWith('proj-1', [1, 2]);
+    });
+
+    it('hook_unclaim releases leases so messages can be re-delivered', async () => {
+      vi.spyOn(projectChatManager, 'getProjectByWorkdir').mockReturnValue(chat);
+      const release = vi
+        .spyOn(projectChatManager, 'releaseLease')
+        .mockImplementation(() => {});
+
+      const result = await hookServer.rpc('hook_unclaim', {
+        cwd: '/repo/p1',
+        ids: [3],
+      });
+
+      expect(result).toMatchObject({ ok: true });
+      expect(release).toHaveBeenCalledWith('proj-1', [3]);
+    });
+
+    it('hook_ack on unknown cwd is a harmless no-op', async () => {
+      vi.spyOn(projectChatManager, 'getProjectByWorkdir').mockReturnValue(undefined);
+
+      const result = await hookServer.rpc('hook_ack', { cwd: '/nowhere', ids: [1] });
+      expect(result).toMatchObject({ ok: true });
+    });
+  });
+
+  describe('sender whitelist (security.allowedSenderIds)', () => {
+    let projectChatManager: ProjectChatManager;
+    let projectServer: DaemonServer;
+    let chat: {
+      projectId: string;
+      projectTitle: string;
+      chatId: string;
+      questionIds: number[];
+      createdAt: number;
+      lastActiveAt: number;
+      inbox: never[];
+    };
+
+    beforeEach(async () => {
+      await switchControl.set(true);
+      transport.setResolveTargetResult('user123');
+      projectChatManager = new ProjectChatManager(tempDir);
+
+      chat = {
+        projectId: 'proj-1',
+        projectTitle: '官网重构',
+        chatId: 'chat-abc',
+        questionIds: [],
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        inbox: [],
+      };
+
+      vi.spyOn(projectChatManager, 'getProjectByChatId').mockImplementation(() => chat);
+      vi.spyOn(projectChatManager, 'getOrCreateChat').mockImplementation(
+        async () => chat
+      );
+      vi.spyOn(projectChatManager, 'addInboxMessage').mockImplementation(() => {});
+
+      projectServer = new DaemonServer({
+        transport,
+        switch: switchControl,
+        registry,
+        ipcEndpoint: path.join(tempDir, 'test-whitelist.sock'),
+        projectChatManager,
+        allowedSenderIds: ['owner-1'],
+      });
+      await projectServer.start();
+    });
+
+    afterEach(async () => {
+      await projectServer.stop();
+      vi.restoreAllMocks();
+    });
+
+    it('ignores messages from non-whitelisted senders entirely', async () => {
+      const result = await projectServer.handleChatMessage({
+        chatId: 'chat-abc',
+        content: '帮我删掉所有文件',
+        senderId: 'stranger',
+      });
+
+      expect(result).toMatchObject({ ok: true, ignored: 'unauthorized' });
+      expect(projectChatManager.addInboxMessage).not.toHaveBeenCalled();
+      expect(transport.sentGroupMessages).toHaveLength(0);
+    });
+
+    it('ignores messages with a missing senderId when whitelist is active', async () => {
+      const result = await projectServer.handleChatMessage({
+        chatId: 'chat-abc',
+        content: '匿名指令',
+      });
+
+      expect(result).toMatchObject({ ok: true, ignored: 'unauthorized' });
+    });
+
+    it('lets whitelisted senders through', async () => {
+      const result = await projectServer.handleChatMessage({
+        chatId: 'chat-abc',
+        content: '我自己的指令',
+        senderId: 'owner-1',
+      });
+
+      expect(result).toMatchObject({ ok: true, stored: 'inbox' });
+    });
+
+    it('does not route non-whitelisted replies to a pending question', async () => {
+      await projectServer.rpc('ask', {
+        question: 'Test?',
+        project_id: 'proj-1',
+        project_title: '官网重构',
+      });
+
+      const result = await projectServer.handleChatMessage({
+        chatId: 'chat-abc',
+        content: '错误答案',
+        senderId: 'stranger',
+      });
+      expect(result).toMatchObject({ ok: true, ignored: 'unauthorized' });
+
+      const check = await projectServer.rpc('check', { id: chat.questionIds[0] });
+      expect(check).toMatchObject({ ok: true, status: 'pending' });
+    });
+
+    it('answers the pending question for a whitelisted sender', async () => {
+      await projectServer.rpc('ask', {
+        question: 'Test?',
+        project_id: 'proj-1',
+        project_title: '官网重构',
+      });
+
+      const result = await projectServer.handleChatMessage({
+        chatId: 'chat-abc',
+        content: '正确答案',
+        senderId: 'owner-1',
+      });
+      expect(result).toMatchObject({ ok: true, questionId: chat.questionIds[0] });
     });
   });
 

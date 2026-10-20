@@ -138,6 +138,60 @@ describe('core/project-chat-manager', () => {
     });
   });
 
+  describe('durable persistence', () => {
+    it('a poisoned temp path makes save fail without damaging the state file', async () => {
+      vi.mocked(proc.run)
+        .mockResolvedValueOnce({ code: 0, stdout: '{"chats":[]}', stderr: '' })
+        .mockResolvedValueOnce({
+          code: 0,
+          stdout: '{"success":true,"result":{"openConversationId":"cid-a"}}',
+          stderr: '',
+        });
+
+      const file = path.join(tempDir, 'project-chats.json');
+      manager.save();
+      const before = fs.readFileSync(file, 'utf8');
+
+      // A tmp+rename writer hits EISDIR here and the real file survives.
+      // A direct writer would silently overwrite the state instead.
+      fs.mkdirSync(file + '.tmp');
+      await expect(manager.getOrCreateChat('proj-x', 'X')).rejects.toThrow();
+      expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    });
+
+    it('save leaves no temp files behind', () => {
+      manager.save();
+      expect(
+        fs.readdirSync(tempDir).filter((f) => f.includes('.tmp'))
+      ).toHaveLength(0);
+    });
+
+    it('preserves a corrupt state file instead of silently starting fresh', () => {
+      const file = path.join(tempDir, 'project-chats.json');
+      fs.writeFileSync(file, '{truncated');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      manager.load();
+
+      const preserved = fs
+        .readdirSync(tempDir)
+        .filter((f) => f.startsWith('project-chats.json.corrupt'));
+      expect(preserved).toHaveLength(1);
+      expect(
+        fs.readFileSync(path.join(tempDir, preserved[0]), 'utf8')
+      ).toBe('{truncated');
+      expect(fs.existsSync(file)).toBe(false);
+      expect(warn).toHaveBeenCalled();
+      expect(manager.listProjectChats()).toEqual([]);
+    });
+
+    it('a missing state file loads fresh without preserving anything', () => {
+      manager.load();
+      expect(fs.readdirSync(tempDir)).toHaveLength(0);
+      expect(manager.listProjectChats()).toEqual([]);
+    });
+  });
+
   describe('inbox', () => {
     beforeEach(async () => {
       vi.mocked(proc.run)
@@ -174,10 +228,53 @@ describe('core/project-chat-manager', () => {
 
       const claimed = manager.claimUnread('proj-inbox');
       expect(claimed.map((m) => m.content)).toEqual(['指令一', '指令二']);
-      expect(manager.getUnreadCount('proj-inbox')).toBe(0);
 
       const second = manager.claimUnread('proj-inbox');
       expect(second).toHaveLength(0);
+    });
+
+    it('re-claims a message after its 60s lease expires', () => {
+      vi.useFakeTimers();
+      try {
+        manager.addInboxMessage('proj-inbox', 'user1', '会过期的指令', 1);
+
+        const first = manager.claimUnread('proj-inbox');
+        expect(first).toHaveLength(1);
+
+        vi.advanceTimersByTime(60_000);
+        expect(manager.claimUnread('proj-inbox')).toHaveLength(0);
+
+        vi.advanceTimersByTime(1_000);
+        const reclaimed = manager.claimUnread('proj-inbox');
+        expect(reclaimed.map((m) => m.content)).toEqual(['会过期的指令']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('acknowledge marks messages read so they are never re-claimed', () => {
+      vi.useFakeTimers();
+      try {
+        manager.addInboxMessage('proj-inbox', 'user1', '已处理的指令', 1);
+        const claimed = manager.claimUnread('proj-inbox');
+
+        manager.acknowledge('proj-inbox', claimed.map((m) => m.id));
+        expect(manager.getUnreadCount('proj-inbox')).toBe(0);
+
+        vi.advanceTimersByTime(120_000);
+        expect(manager.claimUnread('proj-inbox')).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('releaseLease returns a claimed message to the pool immediately', () => {
+      manager.addInboxMessage('proj-inbox', 'user1', '写失败的指令', 1);
+      const claimed = manager.claimUnread('proj-inbox');
+
+      manager.releaseLease('proj-inbox', claimed.map((m) => m.id));
+      const again = manager.claimUnread('proj-inbox');
+      expect(again.map((m) => m.content)).toEqual(['写失败的指令']);
     });
 
     it('returns empty claim for unknown project', () => {
@@ -210,6 +307,30 @@ describe('core/project-chat-manager', () => {
       manager.recordSentContent('你好！');
       expect(manager.wasSentByAgent('你好！')).toBe(true);
       expect(manager.wasSentByAgent('陌生消息')).toBe(false);
+    });
+
+    it('matches echoes whose whitespace was reformatted by DingTalk', () => {
+      manager.recordSentContent('任务已完成 80%，剩余测试待跑。');
+      expect(
+        manager.wasSentByAgent('任务已完成 80%，\n 剩余测试待跑。')
+      ).toBe(true);
+    });
+
+    it('matches a truncated echo of a long sent message', () => {
+      manager.recordSentContent(
+        '已完成登录模块重构，覆盖单测、集成测试与灰度开关，下一阶段做性能回归。'
+      );
+      expect(
+        manager.wasSentByAgent('已完成登录模块重构，覆盖单测、集成测试与灰度开关')
+      ).toBe(true);
+    });
+
+    it('does not flag short user messages that merely overlap sent text', () => {
+      manager.recordSentContent(
+        '已完成登录模块重构，覆盖单测、集成测试与灰度开关，下一阶段做性能回归。'
+      );
+      expect(manager.wasSentByAgent('重构')).toBe(false);
+      expect(manager.wasSentByAgent('继续完成任务')).toBe(false);
     });
 
     it('getChatByProjectId returns the chat', () => {

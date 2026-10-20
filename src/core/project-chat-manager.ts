@@ -5,6 +5,7 @@ import * as paths from '../platform/paths.js';
 
 const STATE_FILE = 'project-chats.json';
 const MAX_INBOX_SIZE = 100;
+const CLAIM_LEASE_MS = 60_000;
 
 export interface InboxMessage {
   id: number;
@@ -12,6 +13,7 @@ export interface InboxMessage {
   content: string;
   timestamp: number;
   read: boolean;
+  claimedAt?: number;
 }
 
 export interface ProjectChat {
@@ -93,7 +95,7 @@ export class ProjectChatManager {
   }
 
   recordSentContent(content: string): void {
-    this.sentContents.add(content);
+    this.sentContents.add(ProjectChatManager.normalize(content));
     if (this.sentContents.size > 200) {
       const keep = Array.from(this.sentContents).slice(-100);
       this.sentContents = new Set(keep);
@@ -101,7 +103,23 @@ export class ProjectChatManager {
   }
 
   wasSentByAgent(content: string): boolean {
-    return this.sentContents.has(content);
+    const norm = ProjectChatManager.normalize(content);
+    if (!norm) return false;
+    if (this.sentContents.has(norm)) return true;
+
+    // DingTalk may reformat or truncate the echo; match containment only for
+    // fragments long enough that a genuine user message cannot collide.
+    if (norm.length < 20) return false;
+    for (const sent of this.sentContents) {
+      if (sent.length >= 20 && (sent.includes(norm) || norm.includes(sent))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static normalize(text: string): string {
+    return text.replace(/\s+/g, '');
   }
 
   listProjectChats(): ProjectChat[] {
@@ -139,15 +157,50 @@ export class ProjectChatManager {
   claimUnread(projectId: string): InboxMessage[] {
     const chat = this.chats.get(projectId);
     if (!chat) return [];
-    const unread = chat.inbox.filter((m) => !m.read);
-    if (unread.length === 0) {
-      return unread;
+    const now = Date.now();
+    // Two-phase delivery: claiming takes a short lease. The consumer must
+    // acknowledge() or the message becomes claimable again, so a crashed
+    // wrapper/hook cannot silently swallow phone instructions.
+    const claimable = chat.inbox.filter(
+      (m) => !m.read && (!m.claimedAt || now - m.claimedAt > CLAIM_LEASE_MS)
+    );
+    if (claimable.length === 0) {
+      return claimable;
     }
-    for (const msg of unread) {
-      msg.read = true;
+    for (const msg of claimable) {
+      msg.claimedAt = now;
     }
     this.save();
-    return unread;
+    return claimable;
+  }
+
+  acknowledge(projectId: string, ids: number[]): void {
+    const chat = this.chats.get(projectId);
+    if (!chat) return;
+    const set = new Set(ids);
+    let changed = false;
+    for (const msg of chat.inbox) {
+      if (set.has(msg.id) && !msg.read) {
+        msg.read = true;
+        delete msg.claimedAt;
+        changed = true;
+      }
+    }
+    if (changed) this.save();
+  }
+
+  releaseLease(projectId: string, ids: number[]): void {
+    const chat = this.chats.get(projectId);
+    if (!chat) return;
+    const set = new Set(ids);
+    let changed = false;
+    for (const msg of chat.inbox) {
+      if (set.has(msg.id) && msg.claimedAt !== undefined) {
+        delete msg.claimedAt;
+        changed = true;
+      }
+    }
+    if (changed) this.save();
   }
 
   markAsRead(projectId: string): void {
@@ -176,14 +229,21 @@ export class ProjectChatManager {
       chats: Array.from(this.chats.values()),
     };
 
-    fs.writeFileSync(this.filePath, JSON.stringify(state, null, 2), {
-      mode: 0o600,
-    });
+    // Write-then-rename: a crash mid-save can never leave a truncated state file.
+    const tmp = `${this.filePath}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, this.filePath);
   }
 
   load(): void {
+    let data: string;
     try {
-      const data = fs.readFileSync(this.filePath, 'utf8');
+      data = fs.readFileSync(this.filePath, 'utf8');
+    } catch {
+      return; // No state file yet: start fresh.
+    }
+
+    try {
       const state: PersistedState = JSON.parse(data);
       this.nextInboxId = state.nextInboxId || 1;
       this.chats.clear();
@@ -195,7 +255,18 @@ export class ProjectChatManager {
         this.chats.set(chat.projectId, chat);
       }
     } catch {
-      // File doesn't exist or is invalid, start fresh
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const dest = `${this.filePath}.corrupt-${stamp}`;
+      try {
+        fs.renameSync(this.filePath, dest);
+      } catch {
+        /* best effort */
+      }
+      console.warn(
+        `project-chats.json was unreadable and could not be parsed; preserved at ${dest}, starting fresh.`
+      );
+      this.chats.clear();
+      this.nextInboxId = 1;
     }
   }
 

@@ -49,6 +49,15 @@ export async function runHook(
         .join('\n');
       const additionalContext =
         `手机钉钉发来新消息（用户远程发出，与本机输入同等对待），请逐条处理，并在最终回复中说明结果（最终回复会自动转发到手机）：\n${lines}`;
+      try {
+        await rpc.request('hook_ack', {
+          cwd: input.cwd,
+          ids: messages.map((m: any) => m.id),
+        });
+      } catch {
+        // Best effort: if the ack is lost the 60s lease returns the messages
+        // to the pool instead of dropping them.
+      }
       return JSON.stringify({
         hookSpecificOutput: {
           hookEventName: input.hook_event_name,

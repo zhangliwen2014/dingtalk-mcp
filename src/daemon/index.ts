@@ -31,6 +31,18 @@ export function resolveHeadlessEnabled(configDir: string): boolean {
   }
 }
 
+export function resolveAllowedSenderIds(
+  configDir: string
+): string[] | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(configDir, 'config.json'), 'utf8');
+    const ids = JSON.parse(raw)?.security?.allowedSenderIds;
+    return Array.isArray(ids) && ids.length > 0 ? ids : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class Daemon {
   private server: DaemonServer | null = null;
   private instance: SingleInstance | null = null;
@@ -68,6 +80,12 @@ export class Daemon {
 
     this.sessionRegistry = new SessionRegistry();
     const headlessEnabled = resolveHeadlessEnabled(configDir);
+    const allowedSenderIds = resolveAllowedSenderIds(configDir);
+    if (!allowedSenderIds) {
+      console.warn(
+        'WARNING: security.allowedSenderIds is not set in config.json — anyone who can post in a project group acts as the PC keyboard. Set a whitelist to lock this down.'
+      );
+    }
 
     this.server = new DaemonServer({
       transport: this.transport,
@@ -78,6 +96,7 @@ export class Daemon {
       agentRunner: this.agentRunner,
       sessionRegistry: this.sessionRegistry,
       headlessEnabled,
+      allowedSenderIds,
       onChatCreated: (chatId) => this.listenForChat(chatId),
     });
 

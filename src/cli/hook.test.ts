@@ -3,7 +3,11 @@ import { runHook, type HookInput } from './hook.js';
 
 function makeRpc(result?: Partial<Record<string, any>>) {
   return {
-    request: vi.fn(async (method: string) => result?.[method] ?? { ok: true }),
+    request: vi.fn(async (method: string) => {
+      const v = result?.[method];
+      if (typeof v === 'function') return v();
+      return v ?? { ok: true };
+    }),
   };
 }
 
@@ -95,6 +99,40 @@ describe('cli/hook runHook', () => {
     const out = await runHook(base, rpc, {});
 
     expect(out).toBe('');
+  });
+
+  it('PostToolUse acks delivered message ids', async () => {
+    const rpc = makeRpc({
+      hook_poll: {
+        ok: true,
+        messages: [
+          { id: 1, content: 'A', senderId: 'u1', timestamp: 100 },
+          { id: 4, content: 'B', senderId: 'u1', timestamp: 101 },
+        ],
+      },
+    });
+
+    await runHook(base, rpc, {});
+
+    expect(rpc.request).toHaveBeenCalledWith('hook_ack', {
+      cwd: '/repo/p1',
+      ids: [1, 4],
+    });
+  });
+
+  it('a hook_ack failure still delivers the context (lease reclaims later)', async () => {
+    const rpc = makeRpc({
+      hook_poll: {
+        ok: true,
+        messages: [{ id: 1, content: 'A', senderId: 'u1', timestamp: 100 }],
+      },
+      hook_ack: () => {
+        throw new Error('daemon gone');
+      },
+    });
+
+    const out = await runHook(base, rpc, {});
+    expect(JSON.parse(out).hookSpecificOutput.additionalContext).toContain('A');
   });
 
   it('UserPromptSubmit polls as well', async () => {

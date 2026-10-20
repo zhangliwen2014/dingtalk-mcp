@@ -19,10 +19,12 @@ export interface DaemonServerOptions {
   agentRunner?: Pick<AgentRunner, 'enqueue'>;
   sessionRegistry?: Pick<SessionRegistry, 'isActive' | 'ping' | 'leave'>;
   headlessEnabled?: boolean;
+  allowedSenderIds?: string[];
 }
 
 export class DaemonServer {
   private server: net.Server | null = null;
+  private sockets = new Set<net.Socket>();
   private transport: DingTransport;
   private switch: Switch;
   readonly registry: Registry;
@@ -32,6 +34,7 @@ export class DaemonServer {
   private agentRunner?: Pick<AgentRunner, 'enqueue'>;
   private sessionRegistry?: Pick<SessionRegistry, 'isActive' | 'ping' | 'leave'>;
   private headlessEnabled: boolean;
+  private allowedSenderIds?: string[];
 
   constructor(options: DaemonServerOptions) {
     this.transport = options.transport;
@@ -43,6 +46,10 @@ export class DaemonServer {
     this.agentRunner = options.agentRunner;
     this.sessionRegistry = options.sessionRegistry;
     this.headlessEnabled = options.headlessEnabled ?? false;
+    this.allowedSenderIds =
+      options.allowedSenderIds && options.allowedSenderIds.length > 0
+        ? options.allowedSenderIds
+        : undefined;
   }
 
   async start(): Promise<void> {
@@ -63,16 +70,20 @@ export class DaemonServer {
 
   async stop(): Promise<void> {
     return new Promise((resolve) => {
-      if (this.server) {
-        this.server.close(() => {
-          if (fs.existsSync(this.ipcEndpoint)) {
-            fs.unlinkSync(this.ipcEndpoint);
-          }
-          resolve();
-        });
-      } else {
+      if (!this.server) {
         resolve();
+        return;
       }
+      // net.Server.close() waits for existing connections; long-lived IPC
+      // clients would hang shutdown forever, so drop them explicitly.
+      for (const s of this.sockets) s.destroy();
+      this.sockets.clear();
+      this.server.close(() => {
+        if (fs.existsSync(this.ipcEndpoint)) {
+          fs.unlinkSync(this.ipcEndpoint);
+        }
+        resolve();
+      });
     });
   }
 
@@ -109,6 +120,10 @@ export class DaemonServer {
         return this.handleHookLeave(params);
       case 'hook_poll':
         return this.handleHookPoll(params);
+      case 'hook_ack':
+        return this.handleHookAck(params);
+      case 'hook_unclaim':
+        return this.handleHookUnclaim(params);
       case 'hook_mirror':
         return this.handleHookMirror(params);
       default:
@@ -192,7 +207,7 @@ export class DaemonServer {
     return {
       ok: true,
       status: 'pending',
-      id,
+      questionId: id,
       chatId: projectChat.chatId,
     };
   }
@@ -221,7 +236,7 @@ export class DaemonServer {
     return {
       ok: true,
       status: 'pending',
-      id,
+      questionId: id,
     };
   }
 
@@ -302,7 +317,7 @@ export class DaemonServer {
         question.accept(result.text, 'phone');
         this.registry.save();
       }
-      return { ok: true, routed: 'answer', id: result.id };
+      return { ok: true, routed: 'answer', questionId: result.id };
     }
 
     if (result.kind === 'ambiguous') {
@@ -319,6 +334,13 @@ export class DaemonServer {
   }): Promise<any> {
     if (!this.projectChatManager) {
       return { ok: false, error: 'no project chat manager' };
+    }
+
+    // Group messages act as PC keyboard input; only whitelisted senders may drive the agent.
+    if (this.allowedSenderIds) {
+      if (!params.senderId || !this.allowedSenderIds.includes(params.senderId)) {
+        return { ok: true, ignored: 'unauthorized' };
+      }
     }
 
     if (this.projectChatManager.wasSentByAgent(params.content)) {
@@ -395,7 +417,7 @@ export class DaemonServer {
     this.registry.save();
     await this.sendAck(params.chatId);
 
-    return { ok: true, id: pendingQuestion.id };
+    return { ok: true, questionId: pendingQuestion.id };
   }
 
   private async sendAck(chatId: string): Promise<void> {
@@ -443,6 +465,22 @@ export class DaemonServer {
         timestamp: m.timestamp,
       })),
     };
+  }
+
+  private handleHookAck(params: { cwd: string; ids: number[] }): any {
+    const chat = this.projectChatManager?.getProjectByWorkdir(params.cwd);
+    if (chat && this.projectChatManager) {
+      this.projectChatManager.acknowledge(chat.projectId, params.ids ?? []);
+    }
+    return { ok: true };
+  }
+
+  private handleHookUnclaim(params: { cwd: string; ids: number[] }): any {
+    const chat = this.projectChatManager?.getProjectByWorkdir(params.cwd);
+    if (chat && this.projectChatManager) {
+      this.projectChatManager.releaseLease(chat.projectId, params.ids ?? []);
+    }
+    return { ok: true };
   }
 
   private async handleHookMirror(params: {
@@ -545,6 +583,10 @@ export class DaemonServer {
   private handleConnection(socket: net.Socket): void {
     let buffer = '';
 
+    this.sockets.add(socket);
+    socket.on('close', () => this.sockets.delete(socket));
+    socket.on('error', () => this.sockets.delete(socket));
+
     socket.on('data', (data) => {
       buffer += data.toString();
 
@@ -574,7 +616,7 @@ export class DaemonServer {
   ): Promise<void> {
     try {
       const result = await this.rpc(request.method, request.params);
-      const response = { id: request.id, ...result };
+      const response = { ...result, id: request.id };
       socket.write(JSON.stringify(response) + '\n');
     } catch (err) {
       const response = {

@@ -126,6 +126,113 @@ describe('cli/run InjectionLoop', () => {
     loop.stop();
     expect(rpc.calls.filter((c) => c[0] === 'hook_leave')).toHaveLength(1);
   });
+
+  it('skips ticks while a previous tick is still in flight (no re-entrant poll)', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const methods: string[] = [];
+    rpc.request = vi.fn(async (method: string) => {
+      methods.push(method);
+      if (method === 'hook_poll') {
+        await gate;
+        return { ok: true, messages: [] };
+      }
+      return { ok: true };
+    });
+
+    await loop.start();
+    await vi.advanceTimersByTimeAsync(1000); // tick 1 starts, poll stalls on the gate
+    methods.length = 0;
+
+    await vi.advanceTimersByTimeAsync(3000); // ticks 2 and 3 land while tick 1 is busy
+    expect(methods).toHaveLength(0);
+
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    methods.length = 0;
+    await vi.advanceTimersByTimeAsync(1000); // next interval runs normally again
+    expect(methods).toContain('hook_poll');
+  });
+
+  it('acks successfully injected message ids', async () => {
+    rpc.request = vi.fn(async (method: string, params: unknown) => {
+      rpc.calls.push([method, params]);
+      if (method === 'hook_poll') {
+        return {
+          ok: true,
+          messages: [{ id: 7, content: 'x', senderId: 'u', timestamp: 1 }],
+        };
+      }
+      return { ok: true };
+    });
+
+    await loop.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(400); // the delayed Enter
+
+    expect(rpc.calls).toContainEqual(['hook_ack', { cwd: '/tmp/proj', ids: [7] }]);
+  });
+
+  it('unclaims a message whose write threw, acking the delivered ones', async () => {
+    rpc.request = vi.fn(async (method: string, params: unknown) => {
+      rpc.calls.push([method, params]);
+      if (method === 'hook_poll') {
+        return {
+          ok: true,
+          messages: [
+            { id: 1, content: '好', senderId: 'u', timestamp: 1 },
+            { id: 2, content: '坏', senderId: 'u', timestamp: 2 },
+          ],
+        };
+      }
+      return { ok: true };
+    });
+    loop = new InjectionLoop({
+      rpc,
+      write: (d) => {
+        if (d.includes('坏')) throw new Error('EIO');
+        written.push(d);
+      },
+      sessionId: 'wrap-1',
+      cwd: '/tmp/proj',
+      intervalMs: 1000,
+    });
+
+    await loop.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(rpc.calls).toContainEqual(['hook_ack', { cwd: '/tmp/proj', ids: [1] }]);
+    expect(rpc.calls).toContainEqual(['hook_unclaim', { cwd: '/tmp/proj', ids: [2] }]);
+    expect(written).toEqual([`${PASTE_ON}好${PASTE_OFF}`, '\r']);
+  });
+
+  it('discards messages claimed after the loop was stopped', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    rpc.request = vi.fn(async (method: string) => {
+      if (method === 'hook_poll') {
+        await gate;
+        return {
+          ok: true,
+          messages: [{ id: 1, content: '迟到的消息', senderId: 'u', timestamp: 1 }],
+        };
+      }
+      return { ok: true };
+    });
+
+    await loop.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    loop.stop();
+
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(written).toEqual([]);
+  });
 });
 
 interface FakeChild extends PtyChild {
@@ -395,5 +502,77 @@ describe('cli/run runWrapped', () => {
 
     const before = rpc.calls.length;
     await vi.waitFor(() => expect(rpc.calls.length).toBe(before));
+  });
+
+  it('on SIGTERM/SIGHUP: leaves the session, restores raw mode, kills the child', async () => {
+    for (const signal of ['SIGTERM', 'SIGHUP']) {
+      const child = makeChild();
+      const killSpy = vi.spyOn(child, 'kill');
+      const t = makeTty();
+      const rpc = makeRpc();
+      const handlers: Record<string, () => void> = {};
+      const deps: WrapDeps = {
+        spawn: () => child,
+        connectRpc: () => rpc,
+        tty: t.tty,
+        endpoint: 'e',
+        env: {},
+        onSignal: (sig, cb) => {
+          handlers[sig] = cb;
+        },
+      };
+
+      const p = runWrapped(deps, 'qodercli', []);
+      handlers[signal]();
+
+      expect(killSpy).toHaveBeenCalledTimes(1);
+      expect(t.rawModes).toEqual([true, false]);
+      expect(rpc.calls.map((c) => c[0])).toContain('hook_leave');
+
+      child.fireExit(0);
+      await p;
+    }
+  });
+
+  it('tolerates pty write failures after the child is gone', async () => {
+    vi.useFakeTimers();
+    try {
+      const child = makeChild();
+      child.write = () => {
+        throw new Error('EIO: pty is dead');
+      };
+      const t = makeTty();
+      const rpc = makeRpc();
+      rpc.request = vi.fn(async (method: string) => {
+        if (method === 'hook_poll') {
+          return {
+            ok: true,
+            messages: [{ id: 1, content: 'hi', senderId: 'u', timestamp: 1 }],
+          };
+        }
+        return { ok: true };
+      });
+      const deps: WrapDeps = {
+        spawn: () => child,
+        connectRpc: () => rpc,
+        tty: t.tty,
+        endpoint: 'e',
+        env: {},
+        pollIntervalMs: 1000,
+        warmupMs: 1,
+      };
+
+      const p = runWrapped(deps, 'qodercli', []);
+      expect(() => t.sendStdin('x')).not.toThrow();
+
+      child.fireData('banner');
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(t.out).toContain('banner');
+
+      child.fireExit(0);
+      await p;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
