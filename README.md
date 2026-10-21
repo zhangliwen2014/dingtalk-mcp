@@ -45,7 +45,7 @@ dtmcp doctor
 To track the latest commit instead of the pinned release:
 
 ```bash
-npm install -g github:zhangliwen2014/dingtalk-mcp#latest
+npm install -g github:zhangliwen2014/dingtalk-mcp#main
 ```
 
 > Not published to npm yet, so `npm install -g dtmcp` does not work.
