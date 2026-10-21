@@ -8,7 +8,7 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 - **Bidirectional**: Answer from your phone or from the terminal - whichever comes first wins
 - **Global switch**: Enable/disable push with `dtmcp on/off`
 - **Multi-project**: Handle questions from multiple projects simultaneously with question IDs
-- **Cross-platform**: Works on macOS, Windows, and Linux
+- **Cross-platform**: macOS tested; Linux and Windows are designed-compatible (see the compatibility matrix below)
 - **Multi-agent**: Compatible with Qoder, Kimi, and other MCP clients
 
 ## Installation
@@ -30,17 +30,35 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
    ```
    - If your organization hasn't enabled CLI access, you'll need an admin to enable it once at [DingTalk Developer Console](https://open-dev.dingtalk.com) → "CLI Access Management"
 
-### Install dtmcp
+### Install dtmcp (from GitHub)
 
 ```bash
-npm install -g dtmcp
+npm install -g github:zhangliwen2014/dingtalk-mcp#v0.1.0
 ```
 
-Or use directly with npx (no installation needed):
+The install runs the `prepare` script, which compiles TypeScript automatically. Verify with:
 
 ```bash
-npx -y dtmcp doctor
+dtmcp doctor
 ```
+
+To track the latest commit instead of the pinned release:
+
+```bash
+npm install -g github:zhangliwen2014/dingtalk-mcp#latest
+```
+
+> Not published to npm yet, so `npm install -g dtmcp` does not work.
+
+Installing from Git requires `git` and network access to GitHub.
+
+### Platform compatibility
+
+| Platform | Status | Notes |
+|---|---|---|
+| macOS (arm64 / x64) | ✅ Live-tested | Reference platform; node-pty ships prebuilds |
+| Linux (Ubuntu) | 🟡 Designed-compatible, not live-tested | node-pty has no Linux prebuild: install `python3 make g++` first; daemon uses Unix sockets |
+| Windows | 🟠 Partial | Named-pipe IPC and `%APPDATA%` paths implemented; `dtmcp run` PTY path and socket cleanup are not live-tested |
 
 ## Quick Start
 
