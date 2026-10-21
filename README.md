@@ -33,8 +33,10 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 ### Install dtmcp (from GitHub)
 
 ```bash
-npm install -g github:zhangliwen2014/dingtalk-mcp#v0.1.0
+npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#v0.1.0
 ```
+
+`--install-links` avoids an npm 11 bug where Git dependencies can end up as symlinks to a temporary clone that is deleted afterwards.
 
 Compiled JavaScript is committed under `dist/`, so Git installs need no build step or TypeScript toolchain. Verify with:
 
@@ -45,7 +47,13 @@ dtmcp doctor
 To track the latest commit instead of the pinned release:
 
 ```bash
-npm install -g github:zhangliwen2014/dingtalk-mcp#main
+npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#main
+```
+
+Alternative without Git: install the tagged source archive directly:
+
+```bash
+npm install -g https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.0.tar.gz
 ```
 
 > Not published to npm yet, so `npm install -g dtmcp` does not work.
