@@ -16,7 +16,10 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 ### Prerequisites
 
 1. **Node.js >= 20**: [Download](https://nodejs.org/)
+   - Windows: `winget install OpenJS.NodeJS.LTS`, then open a **new** terminal (PATH only refreshes in new windows). The installer also puts npm and the global bin dir (`%APPDATA%\npm`) on PATH.
+   - Note: agent CLIs like qodercli/Kimi bundle their own runtime — that is **not** Node/npm. `dtmcp` needs a real Node.js install.
 2. **dws CLI**: DingTalk Workspace CLI
+   - The dws installer below installs **dws only**; `dtmcp` is a separate step further down.
    ```bash
    # macOS/Linux
    curl -fsSL https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.sh | sh
