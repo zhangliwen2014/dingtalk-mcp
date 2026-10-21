@@ -36,7 +36,7 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 npm install -g github:zhangliwen2014/dingtalk-mcp#v0.1.0
 ```
 
-The install runs the `prepare` script, which compiles TypeScript automatically. Verify with:
+The install runs the `postinstall` build step, which compiles TypeScript automatically. Verify with:
 
 ```bash
 dtmcp doctor
