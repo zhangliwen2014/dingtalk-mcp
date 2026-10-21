@@ -1,0 +1,1 @@
+{"version":3,"file":"install-hooks.d.ts","sourceRoot":"","sources":["../../src/cli/install-hooks.ts"],"names":[],"mappings":"AAEA,eAAO,MAAM,kBAAkB,eAAe,CAAC;AAO/C,KAAK,WAAW,GAAG,MAAM,CAAC,MAAM,EAAE,OAAO,CAAC,CAAC;AAoB3C,wBAAgB,UAAU,CACxB,QAAQ,EAAE,WAAW,EACrB,OAAO,GAAE,MAA2B,GACnC,WAAW,CA6Bb;AAED,wBAAgB,gBAAgB,CAC9B,YAAY,EAAE,MAAM,EACpB,OAAO,GAAE,MAA2B,GACnC,IAAI,CAUN"}

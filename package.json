@@ -23,7 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "postinstall": "npm run build && (chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper 2>/dev/null || true)"
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper 2>/dev/null || true"
   },
   "keywords": [
     "dingtalk",
@@ -35,12 +35,12 @@
   "author": "",
   "license": "Apache-2.0",
   "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
     "vitest": "^1.2.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@types/node": "^20.11.0",
-    "node-pty": "^1.1.0",
-    "typescript": "^5.3.3"
+    "node-pty": "^1.1.0"
   }
 }
