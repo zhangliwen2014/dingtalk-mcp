@@ -24,6 +24,12 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
    # Windows (PowerShell)
    irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex
    ```
+   - Windows installer fails with `Could not determine the latest version` if it can't follow the GitHub `releases/latest` redirect (common behind proxies). Pin the version instead:
+     ```powershell
+     $env:DWS_VERSION = "v1.0.65"   # latest release; skip version detection
+     irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex
+     ```
+     If the release download itself times out, switch to the Gitee mirror (`$env:DWS_GITEE_REPO = "DingTalk-Real-AI/dingtalk-workspace-cli"`, `$env:DWS_VERSION = "v1.0.63"` — it lags GitHub by a few patch releases).
 3. **DingTalk authentication**:
    ```bash
    dws auth login
