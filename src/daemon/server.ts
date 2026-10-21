@@ -8,6 +8,7 @@ import type { AgentRunner, RunnerProject } from './agent-runner.js';
 import type { SessionRegistry } from './session-registry.js';
 import * as net from 'net';
 import * as fs from 'fs';
+import * as path from 'node:path';
 
 export interface DaemonServerOptions {
   transport: DingTransport;
@@ -120,6 +121,8 @@ export class DaemonServer {
         return this.handleHookLeave(params);
       case 'hook_poll':
         return this.handleHookPoll(params);
+      case 'hook_register':
+        return this.handleHookRegister(params);
       case 'hook_ack':
         return this.handleHookAck(params);
       case 'hook_unclaim':
@@ -467,8 +470,38 @@ export class DaemonServer {
     };
   }
 
-  private handleHookAck(params: { cwd: string; ids: number[] }): any {
-    const chat = this.projectChatManager?.getProjectByWorkdir(params.cwd);
+  private async handleHookRegister(params: { cwd: string }): Promise<any> {
+    if (!this.projectChatManager) {
+      return { ok: false, error: 'no project chat manager' };
+    }
+    if (!params.cwd) {
+      return { ok: false, error: 'cwd required' };
+    }
+
+    const existing = this.projectChatManager.getProjectByWorkdir(params.cwd);
+    if (existing) {
+      return {
+        ok: true,
+        projectId: existing.projectId,
+        chatId: existing.chatId,
+        created: false,
+      };
+    }
+
+    const projectId =
+      path.basename(params.cwd.replace(/[\\/]+$/, '')) || 'project';
+    const chat = await this.projectChatManager.getOrCreateChat(projectId, projectId);
+    this.projectChatManager.setWorkdir(chat.projectId, params.cwd);
+    this.onChatCreated?.(chat.chatId);
+    return {
+      ok: true,
+      projectId: chat.projectId,
+      chatId: chat.chatId,
+      created: true,
+    };
+  }
+
+  private handleHookAck(params: { cwd: string; ids: number[] }): any {    const chat = this.projectChatManager?.getProjectByWorkdir(params.cwd);
     if (chat && this.projectChatManager) {
       this.projectChatManager.acknowledge(chat.projectId, params.ids ?? []);
     }

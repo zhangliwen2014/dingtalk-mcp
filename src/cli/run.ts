@@ -40,6 +40,9 @@ export class InjectionLoop {
   async start(): Promise<void> {
     if (this.stopped) return;
     await this.safeRequest('hook_ping', { session_id: this.sessionId, cwd: this.cwd });
+    // Register the wrapped project so a DingTalk group exists (and is polled)
+    // even if the agent never asks a question through the MCP tools.
+    await this.safeRequest('hook_register', { cwd: this.cwd });
     if (this.stopped) return;
     this.timer = setInterval(() => void this.tick(), this.intervalMs);
   }

@@ -51,8 +51,26 @@ describe('cli/run InjectionLoop', () => {
 
   it('registers the live session on start', async () => {
     await loop.start();
-    expect(rpc.calls[0][0]).toBe('hook_ping');
+    expect(rpc.calls.map((c) => c[0])).toEqual(['hook_ping', 'hook_register']);
     expect(rpc.calls[0][1]).toEqual({ session_id: 'wrap-1', cwd: '/tmp/proj' });
+    expect(rpc.calls[1][1]).toEqual({ cwd: '/tmp/proj' });
+  });
+
+  it('keeps ticking even when project registration fails', async () => {
+    rpc.request = vi.fn(async (method: string, params: unknown) => {
+      rpc.calls.push([method, params]);
+      if (method === 'hook_register') {
+        throw new Error('dws down');
+      }
+      if (method === 'hook_poll') {
+        return { ok: true, messages: [] };
+      }
+      return { ok: true };
+    });
+
+    await loop.start();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(rpc.calls.map((c) => c[0])).toContain('hook_poll');
   });
 
   it('each tick keeps alive and pulls pending phone messages', async () => {

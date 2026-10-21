@@ -1,6 +1,6 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v2.1（架构评审修复：RPC 关联 id 语义、两阶段投递 claim/ack/lease、senderId 白名单、原子持久化 + 损坏保全、回声模糊匹配、包装器信号/重入保护、daemon 优雅停机）
+版本：v2.2（v2.1 评审修复 + `dtmcp run` 启动时自动注册项目群：新项目无需先经 MCP 提问即可从手机发起指令）
 日期：2026-10-20
 关联文档：[需求文档](./requirements.md)
 
@@ -1018,3 +1018,4 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
 | v1.9 | 2026-10-20 | 手机 ↔ 电脑活会话双通道（Hook 架构，§3.5.10 重写）：手机钉钉作为同一 Agent 会话的第二 I/O 通道。`dtmcp install-hooks` 外科手术合并 `~/.qoder/settings.json` hooks（幂等、备份、保留用户配置）；`dtmcp hook` 子命令经 IPC 分发——`SessionStart/PostToolUse/UserPromptSubmit` 认领未读手机消息并注入 `additionalContext`，`Stop` 镜像最终回复回手机，`SessionEnd` 注销。`session-registry.ts` 活会话登记（2h 过期自愈）；`claimUnread` 先到先得。inbox 到达改三分支路由：有活会话→提示下一步处理；无会话且 `agent.headless=true`→无头代班；默认关→"qodercli 在电脑上未启动"。无头 runner spawn 注入 `DTMCP_HEADLESS=1` 使 hooks no-op（递归保护）。`agent.headless` 解析：env > config.json > false |
 | v2.0 | 2026-10-20 | 需求升级："项目 CLI 开着即可接收并执行手机指令（无论空闲）"。新增 `dtmcp run` PTY 包装器（§3.5.10.2）：node-pty 内启动 qodercli，透明代理按键；`InjectionLoop` 每 2s `hook_ping`+`hook_poll` 认领未读消息，以括号粘贴 + **分离的 300ms 延迟回车**写入 TUI（同块回车不提交——实测踩坑），空闲即时执行完整 CoT，回复经 Stop hook 镜像回群，回到电脑同会话无缝接续。`core/injector.ts` 编码内核（>5 行或 >500 字符改字面输入防 `[Pasted Text]` 折叠、控制字符 sanitize、CRLF 归一）。热车保护：首次渲染 + 3s 稳定窗后才开始认领；RPC 全容错护住用户终端。`DTMCP_WRAPPED=1` 使被包装会话边界 hook 免认领防双重消费。单实例锁带 PID 文件与死进程回收。node-pty macOS `spawn-helper` 丢可执行位 → `postinstall chmod +x` 修复 |
 | v2.1 | 2026-10-20 | 双评审（架构师+资深开发）修复批次，全量 TDD：**P0** socket 响应封装改 `{...result, id: request.id}`，业务 id 更名 `questionId`（此前 `ask` 等业务返回的顶层 `id` 覆盖 JSON-RPC 关联 id → 客户端永久挂死）；`security.allowedSenderIds` 发送者白名单（未配置=放行+启动告警，命中外发送者整条忽略不回执）。**P1** `hook_poll` 两阶段投递：认领=60s 租约，注入成功 `hook_ack` 落读、pty 写异常 `hook_unclaim` 立即归还、崩溃靠过期自动重投（至少一次语义，`claimUnread` 不再认领即置读）；InjectionLoop tick 重入保护 + stop 后丢弃已认领消息；`dtmcp run` 注册 SIGTERM/SIGHUP（还原 raw mode、击杀子进程防孤儿），loop 写改为透传异常以驱动 unclaim，stdin 代理维持 EIO 容错；回声过滤去空白规范化 + ≥20 字包含判定（钉钉重排/截断回声不再当用户消息）；`project-chats.json`/`state.json` 原子写（tmp+rename）且解析失败**保全**原件为 `*.corrupt-<ts>` 并告警（不再静默清空）；daemon `stop()` 主动销毁在册 IPC 连接（长连接曾使 `server.close()` 永不回调、SIGTERM 挂死需 kill -9）。测试 233 全绿 |
+| v2.2 | 2026-10-21 | 修复"`dtmcp run` 启动的新项目在钉钉没有对应群、手机无法主动发消息"：包装器 `start()` 在 `hook_ping` 后调用新增 RPC `hook_register {cwd}`；daemon 按 `getProjectByWorkdir` 命中则复用，未命中则以 cwd 目录名作为 projectId/projectTitle（群名"<目录名>问答"）调 `getOrCreateChat` 建群、`setWorkdir` 绑定并触发 `onChatCreated` 开始轮询。注册失败不影响注入循环（safeRequest 容错），群已存在时幂等。限制：不同路径同名目录会共用/覆盖同一 projectId 的 workdir 绑定 |

@@ -910,6 +910,84 @@ describe('DaemonServer', () => {
       const result = await hookServer.rpc('hook_ack', { cwd: '/nowhere', ids: [1] });
       expect(result).toMatchObject({ ok: true });
     });
+
+    it('hook_register creates a project chat for an unknown cwd and binds workdir', async () => {
+      vi.spyOn(projectChatManager, 'getProjectByWorkdir').mockReturnValue(undefined);
+      const created = {
+        projectId: 'other-proj',
+        projectTitle: 'other-proj',
+        chatId: 'chat-new',
+        questionIds: [],
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        inbox: [],
+      };
+      const getOrCreate = vi
+        .spyOn(projectChatManager, 'getOrCreateChat')
+        .mockResolvedValue(created);
+      const setWorkdir = vi
+        .spyOn(projectChatManager, 'setWorkdir')
+        .mockImplementation(() => {});
+
+      const result = await hookServer.rpc('hook_register', {
+        cwd: '/repo/other-proj',
+      });
+
+      expect(getOrCreate).toHaveBeenCalledWith('other-proj', 'other-proj');
+      expect(setWorkdir).toHaveBeenCalledWith('other-proj', '/repo/other-proj');
+      expect(result).toMatchObject({
+        ok: true,
+        projectId: 'other-proj',
+        chatId: 'chat-new',
+        created: true,
+      });
+    });
+
+    it('hook_register starts polling for the newly created chat', async () => {
+      vi.spyOn(projectChatManager, 'getProjectByWorkdir').mockReturnValue(undefined);
+      vi.spyOn(projectChatManager, 'getOrCreateChat').mockResolvedValue({
+        projectId: 'fresh',
+        projectTitle: 'fresh',
+        chatId: 'chat-fresh',
+        questionIds: [],
+        createdAt: Date.now(),
+        lastActiveAt: Date.now(),
+        inbox: [],
+      });
+      vi.spyOn(projectChatManager, 'setWorkdir').mockImplementation(() => {});
+      const onChatCreated = vi.fn();
+
+      const s = new DaemonServer({
+        transport,
+        switch: switchControl,
+        registry,
+        ipcEndpoint: path.join(tempDir, 'test-register.sock'),
+        projectChatManager,
+        onChatCreated,
+      });
+      await s.start();
+      try {
+        await s.rpc('hook_register', { cwd: '/repo/fresh' });
+        expect(onChatCreated).toHaveBeenCalledWith('chat-fresh');
+      } finally {
+        await s.stop();
+      }
+    });
+
+    it('hook_register reuses an existing project for the cwd', async () => {
+      vi.spyOn(projectChatManager, 'getProjectByWorkdir').mockReturnValue(chat);
+      const getOrCreate = vi.spyOn(projectChatManager, 'getOrCreateChat');
+
+      const result = await hookServer.rpc('hook_register', { cwd: '/repo/p1' });
+
+      expect(getOrCreate).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        ok: true,
+        projectId: 'proj-1',
+        chatId: 'chat-abc',
+        created: false,
+      });
+    });
   });
 
   describe('sender whitelist (security.allowedSenderIds)', () => {
