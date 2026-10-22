@@ -43,7 +43,7 @@ export interface Tty {
     onStdinData(cb: (data: string) => void): void;
 }
 export interface WrapDeps {
-    spawn: (command: string, args: string[], opts: any) => PtyChild;
+    spawn: (command: string, args: string | string[], opts: any) => PtyChild;
     connectRpc: (endpoint: string) => RpcLike;
     tty: Tty;
     endpoint: string;
@@ -56,6 +56,16 @@ export declare function resolveLaunch(argv: string[], defaultCommand: string): {
     command: string;
     args: string[];
 };
-export declare function runWrapped(deps: WrapDeps, command: string, args: string[]): Promise<number>;
+export interface WindowsResolveOptions {
+    pathEnv?: string;
+    cwd?: string;
+    comspec?: string;
+    exists?: (path: string) => boolean;
+}
+export declare function resolveWindowsLaunch(command: string, args: string[], opts?: WindowsResolveOptions): {
+    command: string;
+    args: string | string[];
+};
+export declare function runWrapped(deps: WrapDeps, command: string, args: string | string[]): Promise<number>;
 export declare function runCommand(argv: string[]): Promise<void>;
 //# sourceMappingURL=run.d.ts.map

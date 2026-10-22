@@ -77,7 +77,9 @@ Installing from Git requires `git` and network access to GitHub.
 |---|---|---|
 | macOS (arm64 / x64) | ✅ Live-tested | Reference platform; node-pty ships prebuilds |
 | Linux (Ubuntu) | 🟡 Designed-compatible, not live-tested | node-pty has no Linux prebuild: install `python3 make g++` first; daemon uses Unix sockets |
-| Windows | 🟡 Partially live-tested (2026-10-22, Win11 + Node 24) | npm Git-依赖在 Windows 报 `ENOTEMPTY`/`spawn cmd.exe ENOENT` → 用 archive tarball 安装；node-pty win32-x64 预编译实测可 spawn（无需跑安装脚本）；`dtmcp run` 全流程与命名管道 daemon 未测 |
+| Windows | 🟡 Partially live-tested (2026-10-22, Win11 + Node 24) | npm Git-依赖在 Windows 报 `ENOTEMPTY`/`spawn cmd.exe ENOENT` → 用 archive tarball 安装；node-pty win32-x64 预编译实测可 spawn（无需跑安装脚本）；`dtmcp run` 启动 agent CLI 实测可用（`.exe` 直启、`.cmd` 经 `cmd.exe` 包装）；命名管道 daemon 全流程仍未测 |
+
+> **Windows 下 `dtmcp run` 报 `Error: Cannot create process, error code: 2`**：旧版本把命令原样交给 `CreateProcessW`，它只解析 `.exe`，而 npm 全局安装的 CLI（qodercli/Kimi/claude）在 Windows 上是 `.cmd` 批处理包装。main 分支已修复：`dtmcp run` 会按 cwd→PATH 解析 `.exe`，`.cmd/.bat` 自动经 `cmd.exe /d /s /c` 启动。升级即可（v0.1.0 及更早的已装版本需重装）。
 
 ## Quick Start
 

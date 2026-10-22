@@ -3,6 +3,7 @@ import {
   InjectionLoop,
   runWrapped,
   resolveLaunch,
+  resolveWindowsLaunch,
   type PtyChild,
   type RpcLike,
   type Tty,
@@ -355,6 +356,91 @@ describe('cli/run resolveLaunch', () => {
       command: 'claude',
       args: ['-p', 'hi'],
     });
+  });
+});
+
+describe('cli/run resolveWindowsLaunch', () => {
+  const COMSPEC = 'C:\\Windows\\System32\\cmd.exe';
+
+  function opts(files: string[], extra: Partial<Parameters<typeof resolveWindowsLaunch>[3]> = {}) {
+    const set = new Set(files);
+    return {
+      exists: (p: string) => set.has(p),
+      pathEnv: 'D:\\tools;C:\\Users\\u\\AppData\\Roaming\\npm',
+      cwd: 'C:\\proj',
+      comspec: COMSPEC,
+      ...extra,
+    };
+  }
+
+  it('resolves a bare command to its .exe on PATH', () => {
+    const files = ['D:\\tools\\node.exe'];
+    expect(resolveWindowsLaunch('node', ['-v'], opts(files))).toEqual({
+      command: 'D:\\tools\\node.exe',
+      args: ['-v'],
+    });
+  });
+
+  it('prefers .exe over .cmd in the same directory', () => {
+    const files = ['D:\\tools\\agent.cmd', 'D:\\tools\\agent.exe'];
+    expect(resolveWindowsLaunch('agent', [], opts(files)).command).toBe('D:\\tools\\agent.exe');
+  });
+
+  it('wraps a .cmd shim through cmd.exe with a quoted path', () => {
+    const files = ['C:\\Users\\u\\AppData\\Roaming\\npm\\qodercli.cmd'];
+    expect(resolveWindowsLaunch('qodercli', [], opts(files))).toEqual({
+      command: COMSPEC,
+      args: '/d /s /c ""C:\\Users\\u\\AppData\\Roaming\\npm\\qodercli.cmd""',
+    });
+  });
+
+  it('keeps args and quotes only those with whitespace', () => {
+    const files = ['C:\\Users\\u\\AppData\\Roaming\\npm\\qodercli.cmd'];
+    const r = resolveWindowsLaunch('qodercli', ['--resume', 'my session'], opts(files));
+    expect(r.args).toBe(
+      '/d /s /c ""C:\\Users\\u\\AppData\\Roaming\\npm\\qodercli.cmd" --resume "my session""'
+    );
+  });
+
+  it('wraps an explicitly named .cmd given by absolute path', () => {
+    const files = ['C:\\proj\\tools\\my.cmd'];
+    const r = resolveWindowsLaunch('C:\\proj\\tools\\my.cmd', [], opts(files));
+    expect(r.command).toBe(COMSPEC);
+    expect(r.args).toBe('/d /s /c ""C:\\proj\\tools\\my.cmd""');
+  });
+
+  it('appends .exe to an extensionless explicit path', () => {
+    const files = ['D:\\tools\\agent.exe'];
+    expect(resolveWindowsLaunch('D:\\tools\\agent', [], opts(files))).toEqual({
+      command: 'D:\\tools\\agent.exe',
+      args: [],
+    });
+  });
+
+  it('uses the literal name when it already has a spawnable extension', () => {
+    const files = ['D:\\tools\\node.exe'];
+    expect(resolveWindowsLaunch('node.exe', [], opts(files)).command).toBe('D:\\tools\\node.exe');
+  });
+
+  it('prefers cwd over PATH directories', () => {
+    const files = ['C:\\proj\\agent.cmd', 'D:\\tools\\agent.cmd'];
+    const r = resolveWindowsLaunch('agent', [], opts(files));
+    expect(r.command).toBe(COMSPEC);
+    expect(r.args).toBe('/d /s /c ""C:\\proj\\agent.cmd""');
+  });
+
+  it('skips the extensionless sh shim npm also installs', () => {
+    const files = [
+      'C:\\Users\\u\\AppData\\Roaming\\npm\\qodercli',
+      'C:\\Users\\u\\AppData\\Roaming\\npm\\qodercli.cmd',
+    ];
+    const r = resolveWindowsLaunch('qodercli', [], opts(files));
+    expect(r.command).toBe(COMSPEC);
+  });
+
+  it('throws a clear error when nothing executable exists', () => {
+    expect(() => resolveWindowsLaunch('missing', [], opts([]))).toThrow(/missing/);
+    expect(() => resolveWindowsLaunch('D:\\tools\\missing', [], opts([]))).toThrow(/missing/);
   });
 });
 

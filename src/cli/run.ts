@@ -1,3 +1,5 @@
+import { statSync } from 'node:fs';
+import * as nodePath from 'node:path';
 import { encodeTerminalInput } from '../core/injector.js';
 import * as identity from '../platform/identity.js';
 import * as ipc from '../platform/ipc.js';
@@ -131,7 +133,7 @@ export interface Tty {
 }
 
 export interface WrapDeps {
-  spawn: (command: string, args: string[], opts: any) => PtyChild;
+  spawn: (command: string, args: string | string[], opts: any) => PtyChild;
   connectRpc: (endpoint: string) => RpcLike;
   tty: Tty;
   endpoint: string;
@@ -151,10 +153,100 @@ export function resolveLaunch(
   return { command: defaultCommand, args: [...argv] };
 }
 
+export interface WindowsResolveOptions {
+  pathEnv?: string;
+  cwd?: string;
+  comspec?: string;
+  exists?: (path: string) => boolean;
+}
+
+const EXECUTABLE_EXTS = ['.exe', '.com'];
+const BATCH_EXTS = ['.cmd', '.bat'];
+const SPAWNABLE_EXTS = [...EXECUTABLE_EXTS, ...BATCH_EXTS];
+
+function isBatchFile(file: string): boolean {
+  return BATCH_EXTS.some((ext) => file.toLowerCase().endsWith(ext));
+}
+
+function hasExecutableExt(file: string): boolean {
+  return SPAWNABLE_EXTS.some((ext) => file.toLowerCase().endsWith(ext));
+}
+
+function defaultExists(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// node-pty hands the command line straight to CreateProcessW, which appends
+// only `.exe` — npm's `.cmd` shims (qodercli etc.) are invisible to it and
+// fail with "Cannot create process, error code: 2". Resolve the real target
+// ourselves and run batch files through cmd.exe, which node-pty can spawn.
+export function resolveWindowsLaunch(
+  command: string,
+  args: string[],
+  opts: WindowsResolveOptions = {}
+): { command: string; args: string | string[] } {
+  const exists = opts.exists ?? defaultExists;
+  const comspec = opts.comspec ?? process.env.ComSpec ?? 'cmd.exe';
+
+  const wrapBatch = (batch: string): { command: string; args: string } => {
+    // A single pre-escaped command line: node-pty re-escapes array args for
+    // MSVC argv rules (\"), which cmd.exe cannot parse — the string form is
+    // passed through verbatim. The batch path is always quoted so paths with
+    // spaces survive cmd's /s quote-stripping (first and last quote removed).
+    const inner = [`"${batch}"`, ...args.map((a) => (/\s/.test(a) ? `"${a}"` : a))].join(' ');
+    return { command: comspec, args: `/d /s /c "${inner}"` };
+  };
+
+  if (command.includes('\\') || command.includes('/')) {
+    const candidates = hasExecutableExt(command)
+      ? [command]
+      : [command, ...SPAWNABLE_EXTS.map((ext) => command + ext)];
+    for (const candidate of candidates) {
+      if (!exists(candidate)) continue;
+      return isBatchFile(candidate)
+        ? wrapBatch(nodePath.resolve(candidate))
+        : { command: candidate, args };
+    }
+    throw new Error(`dtmcp run: '${command}' not found (cwd and PATH searched)`);
+  }
+
+  const dirs = [opts.cwd ?? process.cwd()];
+  for (const part of (opts.pathEnv ?? process.env.PATH ?? '').split(nodePath.delimiter)) {
+    const dir = part.trim().replace(/^"(.*)"$/, '$1');
+    if (dir) dirs.push(dir);
+  }
+
+  for (const dir of dirs) {
+    const candidates = hasExecutableExt(command)
+      ? [command, ...SPAWNABLE_EXTS.map((ext) => command + ext)]
+      : SPAWNABLE_EXTS.map((ext) => command + ext);
+    for (const name of candidates) {
+      const candidate = nodePath.join(dir, name);
+      if (!exists(candidate)) continue;
+      return isBatchFile(candidate)
+        ? wrapBatch(candidate)
+        : { command: candidate, args };
+    }
+  }
+
+  throw new Error(
+    `dtmcp run: cannot find '${command}' (searched cwd and PATH for .exe/.cmd/.bat). ` +
+      `Install it, or check dtmcp doctor.`
+  );
+}
+
 // Runs `command` inside a PTY, transparently proxying the real terminal,
 // while injecting any pending phone messages as if a human had typed them.
 // Resolves with the child's exit code.
-export function runWrapped(deps: WrapDeps, command: string, args: string[]): Promise<number> {
+export function runWrapped(
+  deps: WrapDeps,
+  command: string,
+  args: string | string[]
+): Promise<number> {
   const cwd = process.cwd();
   const sessionId = randomUUID();
 
@@ -224,7 +316,11 @@ export function runWrapped(deps: WrapDeps, command: string, args: string[]): Pro
 export async function runCommand(argv: string[]): Promise<void> {
   const pty = await import('node-pty');
   const endpoint = ipc.endpoint(identity.instanceId());
-  const { command, args } = resolveLaunch(argv, 'qodercli');
+  const { command: rawCommand, args: rawArgs } = resolveLaunch(argv, 'qodercli');
+  const { command, args } =
+    process.platform === 'win32'
+      ? resolveWindowsLaunch(rawCommand, rawArgs)
+      : { command: rawCommand, args: rawArgs };
 
   const tty: Tty = {
     setRawMode: (m) => {
