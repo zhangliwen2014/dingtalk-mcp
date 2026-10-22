@@ -23,7 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper 2>/dev/null || true"
+    "postinstall": "node -e \"try{for(const a of ['darwin-arm64','darwin-x64'])require('fs').chmodSync('node_modules/node-pty/prebuilds/'+a+'/spawn-helper',0o755)}catch(e){}\""
   },
   "keywords": [
     "dingtalk",

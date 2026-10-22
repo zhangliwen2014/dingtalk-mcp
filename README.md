@@ -59,11 +59,13 @@ To track the latest commit instead of the pinned release:
 npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#main
 ```
 
-Alternative without Git: install the tagged source archive directly:
+Alternative without Git — install the tagged source archive directly. This is also the **recommended path on Windows**, where npm's Git-dependency handling can fail with `ENOTEMPTY` or `spawn ... ENOENT` (verified working on a Windows 11 box):
 
 ```bash
 npm install -g https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.0.tar.gz
 ```
+
+On npm >= 11.19 install scripts are blocked by default; add `--allow-scripts=dtmcp,node-pty` to either command (or accept npm's warning — node-pty ships win32/darwin prebuilds that load without scripts).
 
 > Not published to npm yet, so `npm install -g dtmcp` does not work.
 
@@ -75,7 +77,7 @@ Installing from Git requires `git` and network access to GitHub.
 |---|---|---|
 | macOS (arm64 / x64) | ✅ Live-tested | Reference platform; node-pty ships prebuilds |
 | Linux (Ubuntu) | 🟡 Designed-compatible, not live-tested | node-pty has no Linux prebuild: install `python3 make g++` first; daemon uses Unix sockets |
-| Windows | 🟠 Partial | Named-pipe IPC and `%APPDATA%` paths implemented; `dtmcp run` PTY path and socket cleanup are not live-tested |
+| Windows | 🟡 Partially live-tested (2026-10-22, Win11 + Node 24) | npm Git-依赖在 Windows 报 `ENOTEMPTY`/`spawn cmd.exe ENOENT` → 用 archive tarball 安装；node-pty win32-x64 预编译实测可 spawn（无需跑安装脚本）；`dtmcp run` 全流程与命名管道 daemon 未测 |
 
 ## Quick Start
 
