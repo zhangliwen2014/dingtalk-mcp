@@ -88,9 +88,9 @@ Installing from Git requires `git` and network access to GitHub.
    dtmcp doctor
    ```
 
-2. **Initialize target conversation** (sends test message to yourself):
+2. **Start the daemon** (keep it running; MCP talks to it over IPC):
    ```bash
-   dtmcp init
+   dtmcp daemon
    ```
 
 3. **Enable push**:
@@ -103,12 +103,13 @@ Installing from Git requires `git` and network access to GitHub.
    {
      "mcpServers": {
        "dingtalk-mcp": {
-         "command": "npx",
-         "args": ["-y", "dtmcp", "mcp"]
+         "command": "dtmcp",
+         "args": ["mcp"]
        }
      }
    }
    ```
+   The project group chat is created automatically on the first `ask_on_dingtalk` call, or by `dtmcp run` when it starts.
 
 5. **Test it**: Ask your agent a question that requires human input. You'll receive it on your phone!
 
@@ -116,12 +117,14 @@ Installing from Git requires `git` and network access to GitHub.
 
 ```bash
 dtmcp doctor              # Check all prerequisites
-dtmcp init                # Initialize target conversation
 dtmcp status              # Show current status
 dtmcp on                  # Enable push to DingTalk
 dtmcp off                 # Disable push to DingTalk
 dtmcp pending             # List pending questions
-dtmcp reply <id> <text>   # Answer a pending question from terminal
+dtmcp daemon              # Start the background daemon (IPC + polling)
+dtmcp mcp                 # Start the MCP server (stdio)
+dtmcp install-hooks       # Register dtmcp hooks into ~/.qoder/settings.json
+dtmcp run [agent args]    # Wrap an agent TUI (qodercli/kimi/claude) for phone injection
 ```
 
 ## How It Works

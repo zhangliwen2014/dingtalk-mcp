@@ -702,6 +702,8 @@ dtmcp hook                       # qodercli hook 子进程入口（内部使用�
 dtmcp run [qodercli 参数…]        # PTY 包装启动 qodercli：手机指令空闲也即时提交执行（§3.5.10.2）
 ```
 
+> **实现状态（v2.3）**：实际只提供 `doctor / status / on / off / pending / daemon / mcp / hook / install-hooks / run`。上面规划中的 `init`、`ask`、`reply`、`start/stop/logs`、`smoke` 未实现——目标会话改为**按项目自动创建**：首次 MCP `ask_on_dingtalk` 或 `dtmcp run` 的 `hook_register` 触发 `getOrCreateChat`（见 v2.2）。README 的安装后步骤已按实际命令改写。
+
 `dtmcp doctor` 的输出格式要求是**机器可读优先**（`--format json`），人类可读视图由它渲染。理由：同事排错时最常见动作是把这段输出贴给你，一份纯文本描述无法被自动比对，而 JSON 可以直接进 issue。
 
 `dtmcp ask` 提供 `--file` / stdin 入口不是为 convenience：这是 D9（Windows 参数编码）验证失败时唯一不改架构的通路，早一个参数比晚动手便宜。
@@ -1001,14 +1003,14 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
      - 不需要安装钉钉桌面客户端：`dws auth login` 走浏览器，无浏览器用 `--device`
 2. `dws auth login`（无浏览器环境用 `--device`）；若提示组织未开 CLI 访问，按引导提交申请给管理员
 3. `dws profile list` 记下要用的 profile（多账号组织必须显式指定，`dtmcp` 存的是 profile 而非姓名）
-4. `dtmcp init` 解析本人专属目标会话
-5. `dtmcp doctor` 确认就绪
-6. `dtmcp smoke` 确认端到端通（手机上要答一次）
-7. 在 agent 的 MCP 配置里加：
+4. `dtmcp doctor` 确认就绪（dws 安装与登录态都在这一关检查）
+5. `dtmcp daemon` 起守护进程（MCP 经 IPC 连它；需常驻）
+6. 在 agent 的 MCP 配置里加：
 ```json
-{ "mcpServers": { "dingtalk-mcp": { "command": "npx", "args": ["-y", "dtmcp", "mcp"] } } }
+{ "mcpServers": { "dingtalk-mcp": { "command": "dtmcp", "args": ["mcp"] } } }
 ```
-（全局安装后可写成 `{ "command": "dtmcp", "args": ["mcp"] }`）
+（要求已全局安装；当前未发布 npm，`npx -y dtmcp` 不可用）
+7. 首次 `ask_on_dingtalk` 或 `dtmcp run` 会自动创建项目群（v2.2），无需 `dtmcp init`；端到端测试=问一个问题并在手机作答
 
 ## 变更记录
 
