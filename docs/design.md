@@ -819,6 +819,8 @@ agent          mcp薄客户端        daemon              dws           手机
 ```
 反向（手机先答、随后有人在终端敲 reply）走同一份判定，对称。
 
+> **实现状态（v2.7）**：`dtmcp reply` CLI 未实现，阶段 1 只能从手机作答；daemon 内的 `reply` RPC 与"先到先得"判定已就绪，后续补 CLI 入口即可。
+
 ### 6.3 手机端切开关
 
 daemon 收到每条入站消息，**先过 router 的指令分支再过答案分支**：
