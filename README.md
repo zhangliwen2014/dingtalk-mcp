@@ -42,7 +42,7 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 ### Install dtmcp (from GitHub)
 
 ```bash
-npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#v0.1.1
+npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#v0.1.2
 ```
 
 `--install-links` avoids an npm 11 bug where Git dependencies can end up as symlinks to a temporary clone that is deleted afterwards.
@@ -62,7 +62,7 @@ npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#main
 Alternative without Git — install the tagged source archive directly. This is also the **recommended path on Windows**, where npm's Git-dependency handling can fail with `ENOTEMPTY` or `spawn ... ENOENT` (verified working on a Windows 11 box):
 
 ```bash
-npm install -g https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.1.tar.gz
+npm install -g https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
 ```
 
 On npm >= 11.19 install scripts are blocked by default; add `--allow-scripts=dtmcp,node-pty` to either command (or accept npm's warning — node-pty ships win32/darwin prebuilds that load without scripts).
@@ -77,10 +77,10 @@ Re-run the install command with the new tag — npm replaces the global package 
 
 ```bash
 # Git install (macOS / Linux)
-npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.1
+npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.2
 
 # Archive install (recommended on Windows)
-npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.1.tar.gz
+npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
 ```
 
 Then restart the daemon — a running one keeps the old code in memory:
@@ -99,7 +99,7 @@ Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
 Start-Process -WindowStyle Hidden dtmcp -ArgumentList daemon
 ```
 
-Pending questions survive upgrades (`state.json` under `~/.dtmcp` / `%APPDATA%\dtmcp`). Verify with `npm ls -g dtmcp --depth=0` — there is no `dtmcp --version` flag. Agent MCP sessions start a fresh `dtmcp mcp` per session and pick up the new code on reconnect; restart any running `dtmcp run` wrapper too.
+Pending questions survive upgrades (`state.json` under `~/.dtmcp` / `%APPDATA%\dtmcp`). Verify with `dtmcp --version` (or `npm ls -g dtmcp --depth=0`). Agent MCP sessions start a fresh `dtmcp mcp` per session and pick up the new code on reconnect; restart any running `dtmcp run` wrapper too.
 
 ### Platform compatibility
 
@@ -146,6 +146,7 @@ Pending questions survive upgrades (`state.json` under `~/.dtmcp` / `%APPDATA%\d
 ## CLI Commands
 
 ```bash
+dtmcp version             # Print the version (also: dtmcp --version / -v)
 dtmcp doctor              # Check all prerequisites
 dtmcp status              # Show current status
 dtmcp on                  # Enable push to DingTalk

@@ -10,6 +10,7 @@ import { startMcpServer } from '../mcp/index.js';
 import { IpcClient } from '../daemon/client.js';
 import { runHook } from './hook.js';
 import { runCommand } from './run.js';
+import { packageVersion } from './version.js';
 import { installHooksFile } from './install-hooks.js';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
@@ -60,6 +61,11 @@ async function runHookCommand() {
 async function main() {
     const command = process.argv[2];
     switch (command) {
+        case 'version':
+        case '--version':
+        case '-v':
+            console.log(packageVersion());
+            break;
         case 'doctor':
             await runDoctor();
             break;
@@ -96,6 +102,7 @@ async function main() {
             console.log(`Usage: dtmcp <command>
 
 Commands:
+  version   Print the version
   doctor    Check prerequisites
   status    Show current status
   on        Enable push to DingTalk
