@@ -1,5 +1,5 @@
 import { statSync } from 'node:fs';
-import * as nodePath from 'node:path';
+import { win32 as winPath } from 'node:path';
 import { encodeTerminalInput } from '../core/injector.js';
 import * as identity from '../platform/identity.js';
 import * as ipc from '../platform/ipc.js';
@@ -145,13 +145,13 @@ export function resolveWindowsLaunch(command, args, opts = {}) {
             if (!exists(candidate))
                 continue;
             return isBatchFile(candidate)
-                ? wrapBatch(nodePath.resolve(candidate))
+                ? wrapBatch(winPath.resolve(candidate))
                 : { command: candidate, args };
         }
         throw new Error(`dtmcp run: '${command}' not found (cwd and PATH searched)`);
     }
     const dirs = [opts.cwd ?? process.cwd()];
-    for (const part of (opts.pathEnv ?? process.env.PATH ?? '').split(nodePath.delimiter)) {
+    for (const part of (opts.pathEnv ?? process.env.PATH ?? '').split(winPath.delimiter)) {
         const dir = part.trim().replace(/^"(.*)"$/, '$1');
         if (dir)
             dirs.push(dir);
@@ -161,7 +161,7 @@ export function resolveWindowsLaunch(command, args, opts = {}) {
             ? [command, ...SPAWNABLE_EXTS.map((ext) => command + ext)]
             : SPAWNABLE_EXTS.map((ext) => command + ext);
         for (const name of candidates) {
-            const candidate = nodePath.join(dir, name);
+            const candidate = winPath.join(dir, name);
             if (!exists(candidate))
                 continue;
             return isBatchFile(candidate)

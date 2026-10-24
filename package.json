@@ -1,6 +1,6 @@
 {
   "name": "dtmcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DingTalk MCP bridge: push agent questions to mobile DingTalk, get answers back, continue working",
   "type": "module",
   "engines": {
