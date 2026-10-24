@@ -71,6 +71,36 @@ On npm >= 11.19 install scripts are blocked by default; add `--allow-scripts=dtm
 
 Installing from Git requires `git` and network access to GitHub.
 
+### Upgrade
+
+Re-run the install command with the new tag — npm replaces the global package in place, no uninstall needed:
+
+```bash
+# Git install (macOS / Linux)
+npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.1
+
+# Archive install (recommended on Windows)
+npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.1.tar.gz
+```
+
+Then restart the daemon — a running one keeps the old code in memory:
+
+```bash
+pkill -f 'dtmcp/dist/cli/index.js daemon'
+nohup dtmcp daemon >/dev/null 2>&1 &
+```
+
+Windows PowerShell:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'dtmcp.*daemon' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Start-Process -WindowStyle Hidden dtmcp -ArgumentList daemon
+```
+
+Pending questions survive upgrades (`state.json` under `~/.dtmcp` / `%APPDATA%\dtmcp`). Verify with `npm ls -g dtmcp --depth=0` — there is no `dtmcp --version` flag. Agent MCP sessions start a fresh `dtmcp mcp` per session and pick up the new code on reconnect; restart any running `dtmcp run` wrapper too.
+
 ### Platform compatibility
 
 | Platform | Status | Notes |
@@ -79,7 +109,7 @@ Installing from Git requires `git` and network access to GitHub.
 | Linux (Ubuntu) | 🟡 Designed-compatible, not live-tested | node-pty has no Linux prebuild: install `python3 make g++` first; daemon uses Unix sockets |
 | Windows | 🟡 Partially live-tested (2026-10-23, Win11 + Node 24) | npm Git-依赖在 Windows 报 `ENOTEMPTY`/`spawn cmd.exe ENOENT` → 用 archive tarball 安装；node-pty win32-x64 预编译实测可 spawn（无需跑安装脚本）；`dtmcp run` 启动 agent CLI 实测可用（`.exe` 直启、`.cmd` 经 `cmd.exe` 包装）；命名管道 daemon 实测可用（`doctor`/`status`/`ask`/`check_answer`），手机回传尚待人工回复才算闭环 |
 
-> **Windows 下 `dtmcp run` 报 `Error: Cannot create process, error code: 2`**：旧版本把命令原样交给 `CreateProcessW`，它只解析 `.exe`，而 npm 全局安装的 CLI（qodercli/Kimi/claude）在 Windows 上是 `.cmd` 批处理包装。v0.1.1 起已修复：`dtmcp run` 会按 cwd→PATH 解析 `.exe`，`.cmd/.bat` 自动经 `cmd.exe /d /s /c` 启动。v0.1.0 及更早的已装版本需重装。
+> **Windows 下 `dtmcp run` 报 `Error: Cannot create process, error code: 2`**：旧版本把命令原样交给 `CreateProcessW`，它只解析 `.exe`，而 npm 全局安装的 CLI（qodercli/Kimi/claude）在 Windows 上是 `.cmd` 批处理包装。v0.1.1 起已修复：`dtmcp run` 会按 cwd→PATH 解析 `.exe`，`.cmd/.bat` 自动经 `cmd.exe /d /s /c` 启动。v0.1.0 及更早的已装版本按 [Upgrade](#upgrade) 重装并重启 daemon。
 
 ## Quick Start
 
