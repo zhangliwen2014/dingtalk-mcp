@@ -8,7 +8,7 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 - **Bidirectional**: Answer from your phone or from the terminal - whichever comes first wins
 - **Global switch**: Enable/disable push with `dtmcp on/off`
 - **Multi-project**: Handle questions from multiple projects simultaneously with question IDs
-- **Cross-platform**: macOS tested; Linux and Windows are designed-compatible (see the compatibility matrix below)
+- **Cross-platform**: macOS live-tested; Windows partially live-tested; Linux designed-compatible (see the compatibility matrix below)
 - **Multi-agent**: Compatible with Qoder, Kimi, and other MCP clients
 
 ## Installation
@@ -16,17 +16,18 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
 ### Prerequisites
 
 1. **Node.js >= 20**: [Download](https://nodejs.org/)
-   - Windows: `winget install OpenJS.NodeJS.LTS`, then open a **new** terminal (PATH only refreshes in new windows). The installer also puts npm and the global bin dir (`%APPDATA%\npm`) on PATH.
+   - Windows: `winget install OpenJS.NodeJS.LTS`, then open a **new** terminal (PATH only refreshes in new windows). The installer also puts npm and the global bin dir on PATH — usually `%APPDATA%\npm`; portable/zip installs use the Node directory instead. Confirm with `npm config get prefix`.
    - Note: agent CLIs like qodercli/Kimi bundle their own runtime — that is **not** Node/npm. `dtmcp` needs a real Node.js install.
 2. **dws CLI**: DingTalk Workspace CLI
    - The dws installer below installs **dws only**; `dtmcp` is a separate step further down.
-   ```bash
-   # macOS/Linux
-   curl -fsSL https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.sh | sh
-   
-   # Windows (PowerShell)
-   irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex
-   ```
+   - macOS / Linux:
+     ```bash
+     curl -fsSL https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.sh | sh
+     ```
+   - Windows (PowerShell):
+     ```powershell
+     irm https://raw.githubusercontent.com/DingTalk-Real-AI/dingtalk-workspace-cli/main/scripts/install.ps1 | iex
+     ```
    - Windows installer fails with `Could not determine the latest version` if it can't follow the GitHub `releases/latest` redirect (common behind proxies). Pin the version instead:
      ```powershell
      $env:DWS_VERSION = "v1.0.65"   # latest release; skip version detection
@@ -37,50 +38,60 @@ A bridge that pushes agent questions to your mobile DingTalk, gets answers back,
    ```bash
    dws auth login
    ```
+   - No browser / headless machine: `dws auth login --device` prints a code you enter from your phone
    - If your organization hasn't enabled CLI access, you'll need an admin to enable it once at [DingTalk Developer Console](https://open-dev.dingtalk.com) → "CLI Access Management"
 
 ### Install dtmcp (from GitHub)
 
-```bash
-npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#v0.1.2
+Choose the command for your OS — each block contains exactly one install command.
+
+**Windows** (PowerShell / cmd) — install the tagged source archive; npm's Git-dependency handling can fail on Windows with `ENOTEMPTY` or `spawn ... ENOENT`:
+```powershell
+npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
 ```
 
-`--install-links` avoids an npm 11 bug where Git dependencies can end up as symlinks to a temporary clone that is deleted afterwards.
+**macOS / Linux**:
+```bash
+npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.2
+```
 
-Compiled JavaScript is committed under `dist/`, so Git installs need no build step or TypeScript toolchain. Verify with:
+`--install-links` avoids an npm 11 bug where Git dependencies can end up as symlinks to a temporary clone that is deleted afterwards. On npm versions that do not know `--allow-scripts`, npm prints a warning and ignores it — node-pty ships win32/darwin prebuilds that load without install scripts.
+
+Compiled JavaScript is committed under `dist/`, so installs need no build step or TypeScript toolchain. Verify with:
 
 ```bash
+dtmcp --version
 dtmcp doctor
 ```
 
 To track the latest commit instead of the pinned release:
 
+**macOS / Linux**:
 ```bash
 npm install -g --install-links github:zhangliwen2014/dingtalk-mcp#main
 ```
 
-Alternative without Git — install the tagged source archive directly. This is also the **recommended path on Windows**, where npm's Git-dependency handling can fail with `ENOTEMPTY` or `spawn ... ENOENT` (verified working on a Windows 11 box):
-
-```bash
-npm install -g https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
+**Windows**:
+```powershell
+npm install -g https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/heads/main.tar.gz
 ```
-
-On npm >= 11.19 install scripts are blocked by default; add `--allow-scripts=dtmcp,node-pty` to either command (or accept npm's warning — node-pty ships win32/darwin prebuilds that load without scripts).
 
 > Not published to npm yet, so `npm install -g dtmcp` does not work.
 
-Installing from Git requires `git` and network access to GitHub.
+Installing from Git (the macOS/Linux command) requires `git` and network access to GitHub.
 
 ### Upgrade
 
-Re-run the install command with the new tag — npm replaces the global package in place, no uninstall needed:
+Re-run the install command for your OS with the new tag — npm replaces the global package in place, no uninstall needed.
 
-```bash
-# Git install (macOS / Linux)
-npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.2
-
-# Archive install (recommended on Windows)
+**Windows**:
+```powershell
 npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
+```
+
+**macOS / Linux**:
+```bash
+npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.2
 ```
 
 Then restart the daemon — a running one keeps the old code in memory:
@@ -118,14 +129,15 @@ Pending questions survive upgrades (`state.json` under `~/.dtmcp` / `%APPDATA%\d
    dtmcp doctor
    ```
 
-2. **Start the daemon** (keep it running; MCP talks to it over IPC):
+2. **Start the daemon** (keep it running; MCP talks to it over IPC — run it in a terminal, under `nohup`, or as a service):
    ```bash
    dtmcp daemon
    ```
 
-3. **Enable push**:
+3. **Push is enabled by default**. Disable or re-enable it anytime:
    ```bash
-   dtmcp on
+   dtmcp off                 # stop sending questions to DingTalk
+   dtmcp on                  # re-enable
    ```
 
 4. **Configure your agent** (e.g., in Qoder's MCP config):
@@ -142,6 +154,7 @@ Pending questions survive upgrades (`state.json` under `~/.dtmcp` / `%APPDATA%\d
    The project group chat is created automatically on the first `ask_on_dingtalk` call, or by `dtmcp run` when it starts.
 
 5. **Test it**: Ask your agent a question that requires human input. You'll receive it on your phone!
+   Questions are sent from your own DingTalk account, so if no push notification appears, open the project group chat manually — the question is there with a `Q<id>` prefix.
 
 ## CLI Commands
 
@@ -162,7 +175,7 @@ dtmcp run [agent args]    # Wrap an agent TUI (qodercli/kimi/claude) for phone i
 
 1. **Agent asks a question**: The MCP tool `ask_on_dingtalk` is called with the question text
 2. **Push to phone**: The question is sent to your DingTalk with a unique ID (e.g., `Q3`)
-3. **You answer**: Reply on your phone with `#Q3: your answer` or answer from terminal with `dtmcp reply 3 "your answer"`
+3. **You answer**: Reply on your phone with `#Q3: your answer` (or plain text when only one question is pending). The agent picks it up through `check_answer`
 4. **Agent continues**: The answer is returned to the agent, which resumes work
 
 ### Question Routing
@@ -230,4 +243,4 @@ Apache-2.0
 
 ## Contributing
 
-Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/yourusername/dtmcp).
+Contributions welcome! Please open an issue or PR on [GitHub](https://github.com/zhangliwen2014/dingtalk-mcp).

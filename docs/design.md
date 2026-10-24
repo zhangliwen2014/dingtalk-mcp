@@ -1,6 +1,6 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v2.6（新增 `dtmcp version`；v2.5 跨平台 win32 路径解析与 v0.1.1 发布）
+版本：v2.7（安装/升级文档按 OS 拆分与一致性巡检；v2.6 新增 `dtmcp version`，v2.5 跨平台 win32 路径解析与 v0.1.1 发布）
 日期：2026-10-20
 关联文档：[需求文档](./requirements.md)
 
@@ -689,6 +689,7 @@ mcp/mcp-server.ts            ← ask 工具新增 project_id/project_title，RPC
 ### 4.3 CLI 命令
 
 ```
+dtmcp version                    # 打印版本号（v0.1.2 起，另支持 --version / -v）
 dtmcp doctor                     # 前置条件全量自检（FR10），未通过项给下一步动作
 dtmcp init [--target <名称>]     # 解析并持久化本人专属目标会话（D5/FR11 的落地处）
 dtmcp on | off | status          # 开关
@@ -702,7 +703,7 @@ dtmcp hook                       # qodercli hook 子进程入口（内部使用�
 dtmcp run [qodercli 参数…]        # PTY 包装启动 qodercli：手机指令空闲也即时提交执行（§3.5.10.2）
 ```
 
-> **实现状态（v2.3）**：实际只提供 `doctor / status / on / off / pending / daemon / mcp / hook / install-hooks / run`。上面规划中的 `init`、`ask`、`reply`、`start/stop/logs`、`smoke` 未实现——目标会话改为**按项目自动创建**：首次 MCP `ask_on_dingtalk` 或 `dtmcp run` 的 `hook_register` 触发 `getOrCreateChat`（见 v2.2）。README 的安装后步骤已按实际命令改写。
+> **实现状态（v2.6）**：实际提供 `version / doctor / status / on / off / pending / daemon / mcp / hook / install-hooks / run`。上面规划中的 `init`、`ask`、`reply`、`start/stop/logs`、`smoke` 未实现——目标会话改为**按项目自动创建**：首次 MCP `ask_on_dingtalk` 或 `dtmcp run` 的 `hook_register` 触发 `getOrCreateChat`（见 v2.2）。`doctor --format json` 亦未实现，当前输出为人读文本。README 的安装后步骤已按实际命令改写。
 
 `dtmcp doctor` 的输出格式要求是**机器可读优先**（`--format json`），人类可读视图由它渲染。理由：同事排错时最常见动作是把这段输出贴给你，一份纯文本描述无法被自动比对，而 JSON 可以直接进 issue。
 
@@ -961,7 +962,7 @@ CI 矩阵：GitHub Actions，`[macos-latest, windows-latest, ubuntu-latest] × [
 | 项 | 决定 |
 |---|---|
 | 包名 | `dtmcp`（npm），命令同名；bin 提供 `dtmcp` |
-| 安装 | `npm i -g dtmcp` 或零安装 `npx -y dtmcp mcp` 直接写进 agent 配置（NFR16） |
+| 安装 | `npm i -g dtmcp` 或零安装 `npx -y dtmcp mcp` 直接写进 agent 配置（NFR16）。**实现状态**：尚未发布 npm，`npm i -g dtmcp` / `npx -y dtmcp` 均不可用；当前从 GitHub tag 安装（Windows 用 archive tarball、macOS/Linux 用 git 依赖），命令见 README「Install dtmcp」 |
 | `engines` | Node `>=20` |
 | 模块格式 | ESM；MCP SDK 与 CLI 入口都用 ESM，避免 CJS/ESM 双构建 |
 | 对外入口 | `dtmcp mcp`（给 agent 配置）、`dtmcp`（人用 CLI）、`dtmcp daemon`（内部，由前两者调用） |
@@ -1003,8 +1004,8 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
      - 不需要安装钉钉桌面客户端：`dws auth login` 走浏览器，无浏览器用 `--device`
 2. `dws auth login`（无浏览器环境用 `--device`）；若提示组织未开 CLI 访问，按引导提交申请给管理员
 3. `dws profile list` 记下要用的 profile（多账号组织必须显式指定，`dtmcp` 存的是 profile 而非姓名）
-4. `dtmcp doctor` 确认就绪（dws 安装与登录态都在这一关检查）
-5. `dtmcp daemon` 起守护进程（MCP 经 IPC 连它；需常驻）
+4. `dtmcp --version` 看版本、`dtmcp doctor` 确认就绪（dws 安装与登录态都在这一关检查）
+5. `dtmcp daemon` 起守护进程（MCP 经 IPC 连它；需常驻；push 默认开启，`dtmcp off` 可关）
 6. 在 agent 的 MCP 配置里加：
 ```json
 { "mcpServers": { "dingtalk-mcp": { "command": "dtmcp", "args": ["mcp"] } } }
@@ -1029,3 +1030,4 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
 | v2.4 | 2026-10-22 | Windows `dtmcp run` 无法启动 agent CLI（`Error: Cannot create process, error code: 2`）：node-pty 把命令行直接交给 `CreateProcessW`，只补 `.exe`，npm 全局 bin 的 `.cmd` 包装（qodercli/Kimi/claude 全部如此）永远解析不到；且其 `get_shell_path` 探测不追加 `.exe`，连裸名 `cmd` 都判定不存在（`Error: File not found: `）。新增 `resolveWindowsLaunch`（src/cli/run.ts）：win32 下按 cwd→PATH 解析 `.exe/.com/.cmd/.bat`（优先 `.exe`，跳过 npm 同时安装的无扩展名 sh 脚本），`.exe` 以绝对路径直启，`.cmd/.bat` 经 `%ComSpec%` 包装；包装命令行必须以**字符串**形式传给 node-pty（数组形式会按 MSVC argv 规则把引号转义成 `\"`，cmd.exe 无法解析），`/s` 下 cmd 剥掉首尾一对引号，批处理路径恒加引号以容纳空格。找不到目标时抛出明确错误。Windows 11 + Node 24 实测：`dtmcp run qodercli --version`、`dtmcp run npm --version`（含空格路径的 .cmd）、`dtmcp run node --version` 均通；daemon 的 Unix socket 测试套件在 Windows 仍报 EACCES（既有问题，命名管道全流程未测） |
 | v2.5 | 2026-10-24 | v0.1.1：`resolveWindowsLaunch` 改用具名 `path.win32`（此前用宿主 `node:path`，在 macOS 上 `delimiter`/`join`/`resolve` 全按 POSIX 处理，Windows 路径解析与 8 个单测必挂；该函数仅 win32 分支调用，与宿主平台无关）。打包发布 v0.1.1，README 安装命令指向新 tag、Windows 兼容性表补充命名管道 daemon 实测结论，并新增 Upgrade 小节（原地重装 + 重启 daemon，说明 pending 状态保留与 `dtmcp --version` 不存在） |
 | v2.6 | 2026-10-24 | v0.1.2：新增版本查询 `dtmcp version` / `--version` / `-v`（运行时读取安装包自带的 package.json，源码检出与全局安装布局均可解析；此前只能用 `npm ls -g dtmcp` 间接确认）。README CLI 命令表、Upgrade 校验步骤与安装命令同步指向 v0.1.2 |
+| v2.7 | 2026-10-24 | 安装/升级文档巡检：安装、跟踪 main、升级三类命令按 OS 拆成独立代码块（Windows 用 archive tarball，macOS/Linux 用 git 依赖），避免一次复制到两条命令；修正 How It Works 中不存在的 `dtmcp reply`、贡献链接占位符与平台状态描述；补充无浏览器 `dws auth login --device`、push 默认开启、`dtmcp --version` 校验，以及"问题以本人账号发出、手机可能无推送提醒需手动打开项目群"的提示。§13 安装行标注 npm/npx 尚未可用，§4.3 实现状态更新到 v2.6 并注明 `doctor --format json` 未实现 |
