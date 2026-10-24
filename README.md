@@ -47,12 +47,12 @@ Choose the command for your OS — each block contains exactly one install comma
 
 **Windows** (PowerShell / cmd) — install the tagged source archive; npm's Git-dependency handling can fail on Windows with `ENOTEMPTY` or `spawn ... ENOENT`:
 ```powershell
-npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
+npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.3.tar.gz
 ```
 
 **macOS / Linux**:
 ```bash
-npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.2
+npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.3
 ```
 
 `--install-links` avoids an npm 11 bug where Git dependencies can end up as symlinks to a temporary clone that is deleted afterwards. On npm versions that do not know `--allow-scripts`, npm prints a warning and ignores it — node-pty ships win32/darwin prebuilds that load without install scripts.
@@ -86,12 +86,12 @@ Re-run the install command for your OS with the new tag — npm replaces the glo
 
 **Windows**:
 ```powershell
-npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.2.tar.gz
+npm install -g --allow-scripts=dtmcp,node-pty https://github.com/zhangliwen2014/dingtalk-mcp/archive/refs/tags/v0.1.3.tar.gz
 ```
 
 **macOS / Linux**:
 ```bash
-npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.2
+npm install -g --install-links --allow-scripts=dtmcp,node-pty github:zhangliwen2014/dingtalk-mcp#v0.1.3
 ```
 
 Then restart the daemon — a running one keeps the old code in memory:

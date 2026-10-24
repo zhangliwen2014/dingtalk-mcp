@@ -132,7 +132,7 @@ async function runInstallHooks() {
     console.log('  Restart any running qodercli sessions to pick up the hooks.');
 }
 async function runDoctor() {
-    console.log('dtmcp doctor\n');
+    console.log(`dtmcp doctor (${packageVersion()})\n`);
     // Check Node version
     const nodeVersion = process.version;
     const major = parseInt(nodeVersion.slice(1).split('.')[0], 10);

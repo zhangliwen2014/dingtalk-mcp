@@ -1,6 +1,6 @@
 # 设计文档：dingtalk-mcp（钉钉远程问答桥）
 
-版本：v2.7（安装/升级文档按 OS 拆分与一致性巡检；v2.6 新增 `dtmcp version`，v2.5 跨平台 win32 路径解析与 v0.1.1 发布）
+版本：v2.8（`dtmcp doctor` 自报版本；v2.7 安装/升级文档按 OS 拆分与一致性巡检）
 日期：2026-10-20
 关联文档：[需求文档](./requirements.md)
 
@@ -1033,3 +1033,4 @@ dws event consume user_card_action_triggered   # 卡片交互回调（阶段 2 �
 | v2.5 | 2026-10-24 | v0.1.1：`resolveWindowsLaunch` 改用具名 `path.win32`（此前用宿主 `node:path`，在 macOS 上 `delimiter`/`join`/`resolve` 全按 POSIX 处理，Windows 路径解析与 8 个单测必挂；该函数仅 win32 分支调用，与宿主平台无关）。打包发布 v0.1.1，README 安装命令指向新 tag、Windows 兼容性表补充命名管道 daemon 实测结论，并新增 Upgrade 小节（原地重装 + 重启 daemon，说明 pending 状态保留与 `dtmcp --version` 不存在） |
 | v2.6 | 2026-10-24 | v0.1.2：新增版本查询 `dtmcp version` / `--version` / `-v`（运行时读取安装包自带的 package.json，源码检出与全局安装布局均可解析；此前只能用 `npm ls -g dtmcp` 间接确认）。README CLI 命令表、Upgrade 校验步骤与安装命令同步指向 v0.1.2 |
 | v2.7 | 2026-10-24 | 安装/升级文档巡检：安装、跟踪 main、升级三类命令按 OS 拆成独立代码块（Windows 用 archive tarball，macOS/Linux 用 git 依赖），避免一次复制到两条命令；修正 How It Works 中不存在的 `dtmcp reply`、贡献链接占位符与平台状态描述；补充无浏览器 `dws auth login --device`、push 默认开启、`dtmcp --version` 校验，以及"问题以本人账号发出、手机可能无推送提醒需手动打开项目群"的提示。§13 安装行标注 npm/npx 尚未可用，§4.3 实现状态更新到 v2.6 并注明 `doctor --format json` 未实现 |
+| v2.8 | 2026-10-24 | v0.1.3：`dtmcp doctor` 标题行显示当前版本（`dtmcp doctor (0.1.3)`），排错时无需再 `npm ls -g` 反查；README 安装/升级命令与 tag 指向 v0.1.3 |

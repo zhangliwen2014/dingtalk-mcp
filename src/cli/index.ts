@@ -141,7 +141,7 @@ async function runInstallHooks() {
 }
 
 async function runDoctor() {
-  console.log('dtmcp doctor\n');
+  console.log(`dtmcp doctor (${packageVersion()})\n`);
 
   // Check Node version
   const nodeVersion = process.version;
